@@ -1,0 +1,22 @@
+# Phase 1 — MSP Companion override (paste into Betaflight Configurator CLI tab)
+#
+# Prereq: phase0_gps_rescue.diff applied + bench-validated. Companion
+# wired to a free UART (TX/RX/GND/5V).
+#
+# REPLACE the literal `UART_N` below with the real UART number you wired
+# (e.g., UART4 or UART6). The `serial` mask `1` enables MSP on that port.
+#
+# msp_override_channels_mask = 15 (binary 1111) means MSP can override
+# channels 0-3 (Roll/Pitch/Yaw/Throttle). AUX channels 4-7 stay under RX
+# control — that's what the pilot uses to flip companion-active vs manual.
+#
+# Safety: BF MSP-override has a ~500ms internal timeout. When companion
+# stops sending MSP_SET_RAW_RC, RX values resume within that window.
+# This is the load-bearing safety primitive. Verify on your BF version.
+# Reference: github.com/betaflight/betaflight/issues/13374
+
+serial UART_N 1 115200 57600 0 115200
+
+set msp_override_channels_mask = 15
+
+save

@@ -1,0 +1,33 @@
+# Phase 0 — GPS Rescue (paste into Betaflight Configurator CLI tab)
+#
+# Prereq: Betaflight 4.5+ (4.6 if H7), GPS module wired to a UART with
+# Configurator > Ports > GPS feature enabled at 115200, GPS feature on
+# in Configurator > Configuration tab.
+#
+# Per-drone tuning required:
+#   - gps_rescue_throttle_hover: measure during 1m hover, OSD throttle %,
+#     multiply by 10 + 1000 (e.g., 30% → 1300).
+#
+# Mag is intentionally disabled. Flyaways from bad mag are the #1 reported
+# GPS Rescue failure (BF wiki). Re-enable only after dedicated mag-cal
+# validation flight, off the critical path.
+
+set failsafe_procedure = GPS_RESCUE
+set failsafe_delay = 4
+set failsafe_off_delay = 10
+
+set gps_provider = UBLOX
+set gps_auto_config = ON
+set gps_auto_baud = ON
+
+set gps_rescue_min_sats = 8
+set gps_rescue_alt_mode = MAX_ALT
+set gps_rescue_initial_climb = 10
+set gps_rescue_descent_dist = 20
+set gps_rescue_landing_alt = 4
+set gps_rescue_throttle_hover = 1300
+set gps_rescue_min_dth = 50
+
+set mag_hardware = NONE
+
+save
