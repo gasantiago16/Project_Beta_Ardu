@@ -1,5 +1,60 @@
 # Betaflight + Autonomous Nav Integration for Racing Drones
 
+> **Build guide entry point:** [`docs/00_START_HERE.md`](docs/00_START_HERE.md)
+> **Companion software:** [`companion/`](companion/) (Python, runs on Pi Zero 2W)
+> **Betaflight CLI configs:** [`bf_config/`](bf_config/)
+
+## Repository layout
+
+```
+Project_Beta_Ardu/
+├── README.md                       # this file — architectural plan + rationale
+├── docs/                           # phase-by-phase build instructions
+│   ├── 00_START_HERE.md            # read first
+│   ├── 01_phase0_gps_rescue.md     # GPS Rescue per drone (safety floor)
+│   ├── 02_phase05_hardware_audit.md
+│   ├── 03_phase1_companion_wiring.md
+│   ├── 04_phase2_controller.md
+│   ├── 05_phase3_field_drills.md
+│   ├── 06_phase4_race_day.md
+│   └── safety_runbook.md           # cross-cutting safety doctrine
+├── companion/                      # Python companion software
+│   ├── racer_companion/            # main package
+│   │   ├── msp.py                  # MSP v1 wire protocol
+│   │   ├── nav.py                  # haversine + P controllers
+│   │   ├── state.py                # IDLE→CLIMB→TRANSIT→HOLD→RELEASED
+│   │   ├── safety.py               # bounds + geofence + watchdog
+│   │   ├── config.py               # JSON config loader
+│   │   └── main.py                 # 50Hz loop
+│   ├── tests/                      # 48 unit tests
+│   ├── tools/
+│   │   ├── msp_loopback_test.py    # bench test against real BF FC
+│   │   └── replay_synth.py         # offline controller replay
+│   ├── systemd/racer-companion.service
+│   ├── config/start_line.example.json
+│   └── README.md                   # Pi setup from scratch
+└── bf_config/
+    ├── phase0_gps_rescue.diff      # BF CLI snippet for Phase 0
+    ├── phase1_msp_companion.diff   # BF CLI snippet for Phase 1
+    ├── per_drone/                  # versioned per-drone `diff all` dumps
+    └── README.md
+```
+
+## Quick start
+
+```bash
+git clone https://github.com/gasantiago16/Project_Beta_Ardu.git
+cd Project_Beta_Ardu
+$EDITOR docs/00_START_HERE.md       # read the build guide
+```
+
+**For the impatient:** if you just want the safety win on every drone today,
+skip to [Phase 0](docs/01_phase0_gps_rescue.md). It's an evening per drone
+and gives you reliable lost-link RTL with zero new hardware beyond a $25
+GPS module.
+
+---
+
 ## Context
 
 A group of expert Betaflight racers want to add two autonomous capabilities to their racing quads without sacrificing race-day stick feel:
