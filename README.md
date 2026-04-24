@@ -33,10 +33,17 @@ Project_Beta_Ardu/
 │   ├── systemd/racer-companion.service
 │   ├── config/start_line.example.json
 │   └── README.md                   # Pi setup from scratch
-└── bf_config/
-    ├── phase0_gps_rescue.diff      # BF CLI snippet for Phase 0
-    ├── phase1_msp_companion.diff   # BF CLI snippet for Phase 1
-    ├── per_drone/                  # versioned per-drone `diff all` dumps
+├── bf_config/
+│   ├── phase0_gps_rescue.diff      # BF CLI snippet for Phase 0
+│   ├── phase1_msp_companion.diff   # BF CLI snippet for Phase 1
+│   ├── per_drone/                  # versioned per-drone `diff all` dumps
+│   └── README.md
+└── edgetx_scripts/                 # Radio-side EdgeTX Lua scripts
+    ├── SCRIPTS/MIXES/racestrt.lua  # Race-start sequencer (one-button auto-launch)
+    ├── SCRIPTS/MIXES/safelock.lua  # Forces ACRO+AUX-HIGH = unreachable
+    ├── SCRIPTS/TELEMETRY/racehud.lua  # Race-state HUD on radio screen
+    ├── lua_for_beginners.md        # Lua + EdgeTX tutorial for new coders
+    ├── model_setup_walkthrough.md  # Step-by-step radio config (Pocket-class)
     └── README.md
 ```
 
@@ -52,6 +59,13 @@ $EDITOR docs/00_START_HERE.md       # read the build guide
 skip to [Phase 0](docs/01_phase0_gps_rescue.md). It's an evening per drone
 and gives you reliable lost-link RTL with zero new hardware beyond a $25
 GPS module.
+
+**Radio-side scripts (EdgeTX):** if you have a Radiomaster / Jumper / FrSky
+radio running EdgeTX, the [`edgetx_scripts/`](edgetx_scripts/) directory
+adds a one-button race-start sequencer (no more fumbling the dual-flip
+between AUX-companion-LOW and ACRO at "GO"), a software safety lock that
+makes the dangerous `ACRO + AUX-HIGH` combo physically unreachable, and a
+race HUD. Includes a [Lua tutorial for new coders](edgetx_scripts/lua_for_beginners.md).
 
 ---
 
