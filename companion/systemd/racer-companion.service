@@ -1,0 +1,19 @@
+[Unit]
+Description=Project_Beta_Ardu companion (Betaflight + autonomous nav)
+After=network.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=racer
+Group=dialout
+WorkingDirectory=/opt/racer-companion
+ExecStart=/opt/racer-companion/.venv/bin/python -m racer_companion.main --config /etc/racer-companion/config.json
+Restart=on-failure
+RestartSec=2
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

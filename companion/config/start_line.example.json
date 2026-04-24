@@ -1,0 +1,36 @@
+{
+  "companion": {
+    "serial_port": "/dev/ttyAMA0",
+    "baud": 115200,
+    "loop_hz": 50,
+    "telemetry_hz": 10,
+    "aux_channel_index": 6,
+    "aux_active_us_min": 1700,
+    "climb_target_alt_m": 5.0,
+    "arrival_dwell_s": 2.0,
+    "log_path": "/var/log/racer-companion.jsonl"
+  },
+  "nav": {
+    "yaw_kp": 4.0,
+    "yaw_max_us": 200.0,
+    "pitch_kp_per_m": 4.0,
+    "pitch_max_us": 150.0,
+    "yaw_align_threshold_deg": 25.0,
+    "throttle_hover": 1300,
+    "throttle_kp_per_m": 6.0,
+    "throttle_kd_per_cms": 0.4,
+    "throttle_max_offset": 200,
+    "arrival_radius_m": 3.0
+  },
+  "safety": {
+    "geofence_radius_m": 100.0,
+    "min_satellites": 8,
+    "min_vbat": 14.4,
+    "max_distance_from_target_during_transit_m": 200.0
+  },
+  "waypoint": {
+    "lat_deg": 37.7749,
+    "lon_deg": -122.4194,
+    "alt_m": 5.0
+  }
+}
