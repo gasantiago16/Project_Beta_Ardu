@@ -1,0 +1,336 @@
+# MEMORY.md — Project handoff & context
+
+> Read this if you're picking up the project cold. It captures the
+> architectural decisions, sharp edges, and "what to do next" so you don't
+> have to re-derive them from the code.
+
+If you only read one section, read **§ Sharp edges** — that's where the
+silent-failure landmines are buried.
+
+## How to use this file
+
+- **First time on the project:** read top to bottom (~10 minutes), then
+  follow the links in §"Continuing the work."
+- **Returning after time away:** read § Snapshot to see what's changed
+  since you were last here. Skim § Open questions for anything that's been
+  resolved or shifted.
+- **Before a substantive change:** check § "Things explicitly NOT done" —
+  if your idea is on that list, surface it before building. Reasons are
+  load-bearing.
+
+Append, don't reorganize. Date your additions if they materially change
+project state.
+
+---
+
+## Snapshot — v0.3 (Apr 25 2026)
+
+| Component | Status | Validated |
+|-----------|--------|-----------|
+| Plan + architecture (`README.md`) | ✅ shipped | — |
+| Companion Python library (`companion/`) | ✅ shipped | 71 unit tests on push CI |
+| Betaflight CLI configs (`bf_config/`) | ✅ shipped, **no real BF flashed yet** | — |
+| Per-phase build docs (`docs/`) | ✅ shipped | — |
+| EdgeTX Lua scripts (`edgetx_scripts/`) | ✅ shipped, **no radio provisioned yet** | Lupa parse check on push CI |
+| Hardware BOM (`HARDWARE_BOM.md`) | ✅ shipped | — |
+| Drill / incident / sign-off log templates | ✅ shipped, **empty** | — |
+| BF SITL test rig (`sitl/`) | ✅ shipped, **container not yet built** | manual-trigger CI workflow |
+| MAVLink publisher (`racer_companion/mavlink.py`) | ✅ shipped | byte-for-byte vs pymavlink 2.4.49 |
+| QGroundControl on phone setup | ✅ documented, **not yet field-verified** | — |
+
+**8 commits on `main`** (`55d7342` → `391e575`). Two CI workflows: `tests.yml`
+on every push (currently 13–24s, all green), `sitl.yml` manual-trigger.
+
+**No drones built yet.** All progress is software + documentation. Field
+work begins with the first pilot doing Phase 0.
+
+---
+
+## Quick orient
+
+```
+Project_Beta_Ardu/
+├── README.md           — start here, the architectural plan
+├── ROADMAP.md          — what's shipped vs deferred + revisit triggers
+├── HARDWARE_BOM.md     — concrete parts list with prices/links
+├── MEMORY.md           — you are here
+├── docs/               — phase-by-phase build instructions
+├── companion/          — Python (runs on Pi Zero 2W)
+├── bf_config/          — Betaflight CLI snippets
+├── edgetx_scripts/     — Radio-side Lua
+├── sitl/               — BF SITL test rig (Docker)
+├── scripts/            — repo tooling (Lua syntax check, etc.)
+└── .github/workflows/  — CI
+```
+
+**Build guide entry point:** [`docs/00_START_HERE.md`](docs/00_START_HERE.md).
+**Cold-start setup for a new pilot:** Phase 0 in
+[`docs/01_phase0_gps_rescue.md`](docs/01_phase0_gps_rescue.md). One evening,
+GPS Rescue on every drone, gives lost-link RTL with zero new hardware
+beyond a $25 GPS module.
+
+---
+
+## Architectural memory
+
+### Locked-in decisions (re-deciding requires explicit conversation)
+
+1. **100% native Betaflight stick feel during the race is non-negotiable.**
+   Drove the entire architecture toward MSP-override + companion computer.
+   Killed INAV (~90% feel) and ArduPilot (~90% feel) as alternatives.
+2. **Single Betaflight FC + companion (Pi Zero 2W or ESP32) writing virtual
+   sticks via `MSP_SET_RAW_RC` with `msp_override_channels_mask=15`.**
+   Dual-FC architectures with ESC mux were considered and rejected — DShot
+   is bidirectional with RPM telemetry, analog mux glitches it; cold-gyro
+   handover is a 50–200 ms crash window at race speeds.
+3. **Pi Zero 2W is the recommended companion for first build.** ESP32-S3
+   port deferred — Pi gives real OS + journalctl + SSH debug, ~10g penalty.
+4. **Betaflight 4.5.1 as version pin.** All `bf_config/` snippets, the SITL
+   Dockerfile, the docs, are tied to 4.5.x semantics. Bumping = re-validate
+   everything.
+5. **MSP-override timeout (~500 ms) is the load-bearing safety primitive.**
+   When companion stops sending MSP, BF reverts to RX values within this
+   window. Three independent recovery paths (pilot AUX low, safety
+   violation, companion crash) all converge on this same recovery.
+6. **Mag (`mag_hardware`) is intentionally DISABLED.** Mag flyaways are the
+   #1 reported GPS Rescue failure on race quads (carbon frames, PDB
+   interference). Re-enabling requires dedicated calibration validation
+   off the critical path.
+7. **`ACRO + AUX-companion-HIGH = NEVER`.** Enforced by `safelock.lua` in
+   software (forces companion AUX LOW any time mode is ACRO) AND by switch
+   layout in hardware (mode + AUX-companion mapped to coordinates of one
+   3-position switch with that combination unreachable). **Both** required;
+   either alone is insufficient.
+8. **MAVLink Phase 1 = QGroundControl on phone, not radio HUD.** Radio HUD
+   integration deferred because the chain (companion → ELRS RX → ELRS TX →
+   radio MAVLink display) is too hardware/firmware-variable to write once
+   and have it work everywhere. Phone running QGC works on day one.
+
+### Things explicitly NOT done — don't add without re-deciding
+
+| Idea | Why we said no |
+|------|----------------|
+| Dual-FC + ESC mux | Nobody credible has shipped it. DShot bidirectional + cold-gyro handover unsolved. |
+| INAV migration | Single firmware with waypoints + RTH, but ~90% race feel. Violates non-negotiable. |
+| ArduPilot on race quads | Even with 4.7 + FSTRATE_ENABLE (4kHz rate loop on H7), zero racing community uses it. |
+| BF master/alpha waypoint code | `pg/flight_plan.c` + `AUTOPILOT_MODE` exist but SITL-only and unproven. Re-evaluate annually. |
+| MAVLink command ingest by BF | BF is MAVLink-tx-to-GCS only. Doesn't accept commands. |
+| ML / learned controller | A P-controller is debuggable in 50 lines. Failure modes obvious. |
+| Pre-commit hooks (ruff/black/lualint) | Adds friction before codebase has stabilized. Revisit after 5+ contributors. |
+| CI MAVLink publisher integration test | pymavlink as runtime dep is heavy. Tests use byte-for-byte ground truth instead — same effect, no dep. |
+| Pi 3B+/4 as companion | Too heavy and power-hungry. Pi Zero 2W = same compute, 1/3 the weight. |
+| Beitian / no-name GPS modules | Tied to most BF Rescue flyaway reports. Stick to Matek / HGLRC / known-vendor M10. |
+
+If you want to revisit any of these, surface it as an issue first. The
+reasons above are real, not "we just didn't get to it."
+
+---
+
+## Sharp edges (silent failure landmines)
+
+These are the things that compile cleanly, look right, and silently break
+in flight. **Read this list before any change to the load-bearing files.**
+
+### Wire-format
+- **MAVLink `CRC_EXTRA` values are load-bearing.** Constants `{0:50, 253:83, 12500:42}` in `mavlink.py`. A wrong CRC_EXTRA produces frames that pass our internal checks but get silently dropped by every receiver. The `test_heartbeat_byte_for_byte_pymavlink` test catches this for HEARTBEAT — extend the same pattern if you add new message types.
+- **MAVLink v2 field order is sorted by C-type size descending.** Not declaration order. Get this wrong and you'll see "received N msgs, 0 valid" on the receiver side. The encoder in `mavlink.py` already gets this right; preserve it if you refactor.
+- **MSP v1 checksum is XOR of `size + cmd + payload`, not including header bytes.** If you add new MSP commands, double-check `encode_request` in `msp.py`.
+- **Field bit ordering in `safety_reasons_bitmap`** must stay stable so radio-side decoders can rely on it. Defined in `mavlink.py SAFETY_BIT`. Add new reasons at higher bits, never reorder.
+
+### Filesystem / build
+- **EdgeTX `.lua` filenames must be ≤ 8 characters** (FAT 8.3 limit on B&W radios). All current names (`racestrt`, `safelock`, `racehud`) comply. Don't add a `racerecorder.lua` and expect it to load on TX12.
+- **`pyserial` is imported lazily** in `msp.py` (inside `MspClient.__init__`). This lets the module load on a desktop without pyserial installed (for offline tests). Don't move the import to module top — you'll break the test suite on machines without serial hardware.
+- **The 3 SITL tests are env-gated** with `@unittest.skipUnless(os.environ.get("SITL_TCP"), ...)`. Don't lose the decorator — without it, main CI tries to connect to a non-existent SITL and dies.
+- **Line endings in committed files are LF.** Git on Windows warns about LF→CRLF on checkout, which is fine; the files in the repo stay LF. Don't `dos2unix` or `unix2dos` blindly.
+
+### Operational
+- **BF `mag_hardware = NONE` is mandatory** for Phase 0. Even if your GPS
+  module has a built-in magnetometer (M10Q-5883 does), disable it in BF
+  until calibration is independently validated.
+- **`gps_rescue_throttle_hover` is per-drone** and must be measured, not
+  copied. Wrong value = drone climbs forever or crashes hard. Procedure
+  in `docs/01_phase0_gps_rescue.md`.
+- **`msp_override_channels_mask = 15`** must be set, otherwise the companion
+  silently has no effect (BF sends RX values regardless of MSP). Check
+  `bf_config/per_drone/<drone>.txt` if behavior is wrong.
+- **Companion "active" gate is `state.is_active(state)`** — any state other
+  than `CLIMB`/`TRANSIT`/`HOLD` returns `False` and the loop sends NO
+  `MSP_SET_RAW_RC`. This is intentional — silence triggers BF's MSP
+  timeout and RX takes over. Don't add MSP writes outside this gate.
+- **First-tick timing in MAVLink sender:** `_last_heartbeat` and
+  `_last_state` are initialized to `-1e9`, not `0.0`. This is intentional
+  so the first call to `tick()` always emits both. Setting them to 0
+  re-introduces the cold-start bug where no telemetry is sent until enough
+  time has elapsed.
+
+### Test discipline
+- **74 tests, 71 always-run + 3 SITL env-gated.** When you add a new module,
+  add tests in the same commit — the codebase is small enough that bare
+  modules without tests are visible from afar.
+- **Cross-validate wire formats against canonical implementations** when
+  possible. The MAVLink HEARTBEAT test does this against pymavlink. If you
+  add a new MAVLink message type, hand-generate the ground truth via
+  pymavlink (recipe in `docs/mavlink_setup.md`) and assert byte-for-byte.
+
+---
+
+## Continuing the work
+
+Ranked by what unlocks the most for the next contributor.
+
+### Tier 1 — get a drone in the air (highest priority)
+
+1. **First pilot: do Phase 0 on one drone.** Order Matek M10Q-5883
+   (~$28). Follow `docs/01_phase0_gps_rescue.md`. Bench-validate 5/5
+   GPS Rescue drills. Commit your `diff all` output as
+   `bf_config/per_drone/<pilot>_<drone>_phase0.txt`. Append to
+   `docs/drill_log.md` and `docs/sign_offs.md`.
+2. **Phase 0.5 audit spreadsheet.** Per `docs/02_phase05_hardware_audit.md`,
+   one row per drone in the fleet. Tells you who needs FC upgrades, who
+   can go straight to Phase 1+, and total BOM.
+3. **Reference companion build.** First Phase 1+ pilot: provision Pi Zero 2W,
+   `git clone` the repo, `pip install -e companion`, run the `tools/msp_loopback_test.py`
+   against a real BF FC. This shakes out wiring and BF config issues
+   before anyone tries to fly.
+
+### Tier 2 — radio-side rollout (parallel with Tier 1)
+
+4. **First buddy with EdgeTX:** copy `edgetx_scripts/SCRIPTS/` to the
+   radio's SD card, follow `edgetx_scripts/model_setup_walkthrough.md`,
+   do the props-off bench-test matrix (§ 6 of the walkthrough). If
+   anything fails, file an issue and we'll fix the script.
+5. **For new coders:** start with `edgetx_scripts/lua_for_beginners.md`.
+   Make a small change (e.g., tone frequency in `racestrt.lua`), reload
+   on the radio, hear it. That's your first commit.
+
+### Tier 3 — verify the deferred infrastructure works
+
+6. **Manually trigger `sitl.yml` once.** Validates the BF SITL container
+   actually builds in CI. If it works, we have confidence; if it breaks,
+   we know to look at SITL build vs main CI.
+7. **First QGC verification.** Once the reference companion build is
+   running, set `mavlink_publisher: udp://192.168.4.255:14550` in
+   config, fire up QGC on a phone connected to the Pi's WiFi AP, confirm
+   HEARTBEAT + COMPANION_STATE arrive.
+
+### Tier 4 — improvements you might want eventually
+
+8. Field photos for `docs/03_phase1_companion_wiring.md`. Add as you
+   build.
+9. ESP32-S3 port (~2 weekends, see `ROADMAP.md`).
+10. SITL Phase 2 (Gazebo physics for closed-loop tuning, ~1–2 weekends).
+11. MAVLink Phase 2 (radio HUD via ELRS-over-CRSF, ~1–2 weekends per radio
+    variant).
+
+---
+
+## Streams + ownership
+
+Three parallel workstreams from the original plan. Fill in owners as you
+take responsibility — don't leave a blank stream unowned.
+
+| Stream | Scope | Owner |
+|--------|-------|-------|
+| **A — Companion firmware** | `companion/` directory. Run `python -m unittest discover -s tests -t .` before commits. Build the deployable Pi image. | _unassigned_ |
+| **B — BF config** | `bf_config/` directory. Per-drone Phase 0 GPS Rescue tuning. Maintain per-drone dumps. **Bench-validate stale-MSP failsafe behavior** on the chosen BF version (load-bearing safety check). | _unassigned_ |
+| **C — Field testing** | Drill execution. Maintain `docs/drill_log.md`. Drill 4 (TX-kill failsafe) requires Stream C countersignature per drone before Phase 4. | _unassigned_ |
+
+**Cross-stream sync points** (from main `README.md`):
+- After Phase 0.5 audit → share spreadsheet, finalize BOM
+- After Phase 1 bench tests → all owners review companion+BF wiring on reference rig
+- After Phase 2 SITL → walk through controller behavior in sim
+- Before Phase 3 field tests → group safety briefing, drill order locked
+- Before Phase 4 race day → 100% drill pass rate per drone, signed off by Stream C
+
+---
+
+## Validated reference vectors
+
+For maintainers cross-checking wire formats or wondering whether something
+is supposed to be exactly that value:
+
+| Vector | Value | Source |
+|--------|-------|--------|
+| HEARTBEAT frame, default fields, sysid=1 compid=191 seq=0 | `fd0900000001bf000000000000001208000403aec6` | pymavlink 2.4.49 |
+| MAVLink CRC_EXTRA — HEARTBEAT (id 0) | 50 | MAVLink common.xml hash |
+| MAVLink CRC_EXTRA — STATUSTEXT (id 253) | 83 | MAVLink common.xml hash |
+| MAVLink CRC_EXTRA — COMPANION_STATE (id 12500, custom) | 42 | This project, fixed once and stable |
+| Betaflight version pin (SITL Dockerfile, docs) | tag `4.5.1` | https://github.com/betaflight/betaflight/releases/tag/4.5.1 |
+| MSP_SET_RAW_RC command ID | 200 | BF `src/main/msp/msp_protocol.h` |
+| `msp_override_channels_mask` value for R/P/Y/T override | 15 (0b1111) | BF discussion #12615, BF source |
+| Pi UART for companion (default) | `/dev/ttyAMA0` (PL011) | Raspberry Pi BCM serial doc |
+| QGroundControl default UDP listen port | 14550 | QGC docs |
+| BF MSP-override timeout | ~500 ms | BF source `src/main/rx/msp.c` (verify per BF version) |
+
+---
+
+## Open questions / things we punted
+
+These are unresolved enough that they may shift the project. Re-check
+periodically.
+
+- **Will BF SITL build cleanly on later BF tags?** We pin to 4.5.1 but BF
+  release cadence is roughly quarterly. Re-test SITL build before any pin
+  bump.
+- **Will ELRS MAVLink-over-CRSF support stabilize across receivers?** As
+  of 2026 it works on some combos and not others. If the combo you have
+  works, document the working setup in `docs/mavlink_setup.md` and we'll
+  promote to Phase 2.
+- **Is the F4 fleet really not viable for Phase 1+?** `HARDWARE_BOM.md`
+  says F4 + Phase 0 only, F4 + Phase 1+ requires upgrade. If a pilot
+  pushes back ("my F4 has free UARTs and headroom"), test on one F4
+  before changing the recommendation.
+- **MultiGP / DRL / racing-league rules.** Companion-driven autonomous
+  launch likely violates most sanctioned-event rules. Talk to your event
+  organizer before bringing this anywhere sanctioned. Documented in
+  `docs/06_phase4_race_day.md`.
+- **Per-drone variance in `nav.throttle_hover`.** Defaults to 1300 in
+  `start_line.example.json` but real values measured 1275–1325 in the
+  plan. After 5+ drones are tuned, see if it correlates with frame size /
+  weight / battery cell count and add a guidance table.
+
+---
+
+## Conventions
+
+### Code
+- Python 3.10+ (uses `X | None` union syntax). Companion runs on whatever
+  Python ships with the Pi OS image at the time, currently 3.11.
+- Pyserial imported lazily — see § Sharp edges.
+- Lua for EdgeTX is Lua 5.2 dialect (with EdgeTX-specific globals).
+- Filenames in `edgetx_scripts/SCRIPTS/` ≤ 8 chars (FAT 8.3).
+- Tests live next to code (`companion/tests/`). Run with `python -m
+  unittest discover -s tests -t .`.
+
+### Commits
+- Conventional Commits not strictly enforced; commit messages should be
+  descriptive about *why*, not just *what*.
+- Co-author trailer (`Co-Authored-By: ...`) is fine and used by the
+  initial commits.
+- One logical concern per commit. Companion lib + 48 tests in one commit
+  is fine; that's one "thing." Don't bundle docs + code if the docs are
+  unrelated.
+
+### Pull requests
+- Issue / PR templates not yet created (deferred per ROADMAP). When 5+
+  contributors are pushing PRs regularly, add them.
+
+### Tests
+- Add tests in the same commit as the code they cover. The repo is small
+  enough that an untested module stands out.
+- For wire-format / interop code, cross-validate against the canonical
+  implementation when possible (e.g., MAVLink against pymavlink).
+
+---
+
+## Updating this file
+
+- **Append new dated sections** if project state shifts substantially.
+- **Update § Snapshot table** when components flip status (✅ deployed,
+  field-validated, etc.).
+- **Add to § Sharp edges** any time a silent-failure landmine bites and
+  you fix it. The point of this section is to share the scar tissue.
+- **Don't bloat.** If a topic grows past 30 lines, link to its own
+  document instead. This file should stay scannable in under 10 minutes.
+
+Last touched: Apr 25 2026, v0.3, commit `391e575`.

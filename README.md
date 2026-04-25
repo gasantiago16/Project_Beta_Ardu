@@ -9,6 +9,7 @@
 ```
 Project_Beta_Ardu/
 ├── README.md                       # this file — architectural plan + rationale
+├── MEMORY.md                       # project handoff/context — read if picking up cold
 ├── ROADMAP.md                      # what's shipped, what's deferred + triggers
 ├── HARDWARE_BOM.md                 # parts list with prices and links
 ├── .github/workflows/tests.yml     # CI: pytest + Lua syntax check on push
@@ -81,6 +82,10 @@ adds a one-button race-start sequencer (no more fumbling the dual-flip
 between AUX-companion-LOW and ACRO at "GO"), a software safety lock that
 makes the dangerous `ACRO + AUX-HIGH` combo physically unreachable, and a
 race HUD. Includes a [Lua tutorial for new coders](edgetx_scripts/lua_for_beginners.md).
+
+**Picking the project up cold?** Read [`MEMORY.md`](MEMORY.md) — captures
+the architectural decisions, sharp edges, and "what to do next" so you
+don't have to re-derive them from the code.
 
 ---
 
