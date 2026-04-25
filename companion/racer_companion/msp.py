@@ -221,6 +221,19 @@ class MspClient:
             self.ser = serial.Serial(port, baud, timeout=timeout)
         self.buf = bytearray()
 
+    @classmethod
+    def from_adapter(cls, adapter) -> "MspClient":
+        """Construct an MspClient with a pre-built serial-like adapter,
+        bypassing the auto-`pyserial.Serial(...)` call. Used by recorder /
+        replay tooling and in tests where we don't want to open a real port.
+
+        `adapter` must implement read(n)→bytes, write(data)→int, close()→None.
+        """
+        c = cls.__new__(cls)
+        c.ser = adapter
+        c.buf = bytearray()
+        return c
+
     def close(self) -> None:
         if self.ser is not None:
             self.ser.close()

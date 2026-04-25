@@ -15,24 +15,30 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - name: Install companion package
+      - name: Install companion package + dev deps
         working-directory: companion
-        run: pip install -e .
+        run: pip install -e ".[dev]"
       - name: Run unit tests
         working-directory: companion
         run: python -m unittest discover -s tests -t . -v
 
-  lua-syntax:
-    name: Lua syntax (edgetx_scripts)
+  scripts-tests:
+    name: Scripts (Lua + tooling)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - name: Install lupa (embedded Lua 5.4)
-        run: pip install lupa
+      - name: Install lupa + companion (for tune_heading import path)
+        run: |
+          pip install lupa
+          pip install -e companion
       - name: Check Lua scripts parse
         run: python scripts/check_lua_syntax.py
       - name: Run Lua state-machine logic tests
         run: python scripts/test_lua_logic.py
+      - name: Run preflight validator tests
+        run: python scripts/test_preflight_validator.py
+      - name: Run heading-threshold tuning harness tests
+        run: python scripts/test_tune_heading.py
