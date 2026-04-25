@@ -22,6 +22,7 @@ Project_Beta_Ardu/
 │   ├── 05_phase3_field_drills.md
 │   ├── 06_phase4_race_day.md
 │   ├── safety_runbook.md           # cross-cutting safety doctrine
+│   ├── mavlink_setup.md            # QGroundControl on phone + UART config
 │   ├── drill_log.md                # per-drill PASS/FAIL log template
 │   ├── incident_log.md             # post-mortem template + rules
 │   └── sign_offs.md                # per-drone drill sign-offs
@@ -31,6 +32,7 @@ Project_Beta_Ardu/
 │   │   ├── nav.py                  # haversine + P controllers
 │   │   ├── state.py                # IDLE→CLIMB→TRANSIT→HOLD→RELEASED
 │   │   ├── safety.py               # bounds + geofence + watchdog
+│   │   ├── mavlink.py              # MAVLink v2 publisher (UDP / serial)
 │   │   ├── config.py               # JSON config loader
 │   │   └── main.py                 # 50Hz loop
 │   ├── tests/                      # 48 unit tests

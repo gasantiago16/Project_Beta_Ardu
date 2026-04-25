@@ -18,6 +18,15 @@ architectural picture.
 - ✅ Hardware BOM (`HARDWARE_BOM.md`) + drill/incident/sign-off log templates
 - ✅ Betaflight SITL test rig (Phase 1 — protocol-layer validation, no physics)
 
+## Shipped — v0.3 (Apr 25 2026)
+
+- ✅ MAVLink Phase 1 — companion-side publisher (`racer_companion/mavlink.py`)
+  - Hand-rolled MAVLink v2 encoder for HEARTBEAT, STATUSTEXT, custom COMPANION_STATE
+  - UDP + serial backends via `udp://` / `serial://` URIs in config
+  - Byte-for-byte validation against pymavlink 2.4.49 in tests
+  - Integrated into main loop with rate-limiting (1Hz heartbeat, 5Hz state, status-on-change)
+  - QGroundControl on phone setup documented in `docs/mavlink_setup.md`
+
 ## Shipped — v0.2 (Apr 25 2026)
 
 - ✅ `MspClient` accepts `tcp://host:port` URI — companion talks MSP-over-TCP
@@ -55,17 +64,17 @@ architectural picture.
 
 **Effort estimate:** 1 weekend to wire Gazebo to SITL, ~1 more to harden + add to CI. Defer until someone says "I want to tune in sim."
 
-### MAVLink-over-CRSF telemetry forward (companion → radio HUD)
+### MAVLink — Phase 2 (radio HUD via ELRS-over-CRSF)
 
-**Status:** deferred. **Trigger to revisit:** pilots want to see companion state on the radio screen during flight.
+**Status:** Phase 1 (companion-side publisher + QGC support) **shipped** in v0.3 — see `docs/mavlink_setup.md`. Phase 2 (radio HUD integration) deferred. **Trigger to revisit:** pilots want companion state on the transmitter screen during flight (vs. on a phone running QGC).
 
-**Why deferred:** today's `racehud.lua` reads BF-native telemetry (battery, sats, GPS, RSSI/LQ) but cannot read companion state — no plumbing from Pi → BF → ELRS/CRSF → radio.
+**What's shipped:** Companion emits MAVLink v2 frames (HEARTBEAT @ 1Hz + custom COMPANION_STATE @ 5Hz + STATUSTEXT on safety changes) via configurable backend (`udp://host:port` or `serial:///dev/path[@baud]`). Hand-rolled encoder cross-validated byte-for-byte against pymavlink 2.4.49. Phone running QGroundControl on the Pi's WiFi AP works today.
 
-**What it'd look like:** companion publishes a small set of MAVLink HEARTBEAT-like packets over MSP-MAVLink-bridge → BF forwards them via [ELRS MAVLink-over-CRSF](https://www.expresslrs.org/software/mavlink/) → radio's MAVLink module surfaces them as telemetry sensors → racehud.lua reads `getValue("Cstat")` etc.
+**What's deferred:** Radio-side rendering. The complexity isn't on the companion side — it's the chain Pi → ELRS RX → ELRS TX → radio MAVLink display. Every link is hardware/firmware variable. ExpressLRS MAVLink-over-CRSF works on some radio + RX combos and fails on others; Yaapu telemetry script works on some EdgeTX color radios; mono radios don't have native MAVLink display.
 
-**Effort estimate:** complex. ELRS MAVLink mode is bidirectional but every link in the chain needs config. 1–2 weekends, with risk of integration surprises.
+**Effort estimate:** 1–2 weekends per radio variant. Defer until a pilot says "QGC on phone isn't enough."
 
-**Workaround in v0.1:** racestrt.lua exposes `raceStartStateName` global that the HUD reads. That's radio-internal state, not companion state, but it's the highest-value thing to display anyway.
+**Workaround now:** racehud.lua already shows the race-start state via the in-radio global from racestrt.lua. That's the highest-value display state. Companion-side specifics (distance, safety reasons, vbat from companion's perspective) live on QGC.
 
 ### Multi-drone race coordination
 

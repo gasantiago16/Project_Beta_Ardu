@@ -8,7 +8,10 @@
     "aux_active_us_min": 1700,
     "climb_target_alt_m": 5.0,
     "arrival_dwell_s": 2.0,
-    "log_path": "/var/log/racer-companion.jsonl"
+    "log_path": "/var/log/racer-companion.jsonl",
+    "mavlink_publisher": "",
+    "mavlink_heartbeat_hz": 1.0,
+    "mavlink_state_hz": 5.0
   },
   "nav": {
     "yaw_kp": 4.0,

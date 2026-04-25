@@ -20,6 +20,12 @@ class CompanionConfig:
     climb_target_alt_m: float = 5.0
     arrival_dwell_s: float = 2.0
     log_path: str = ""
+    # MAVLink output. Empty = disabled. Examples:
+    #   "udp://192.168.4.255:14550"  — broadcast to QGroundControl on phone
+    #   "serial:///dev/ttyAMA1@57600" — UART for radio-side integration
+    mavlink_publisher: str = ""
+    mavlink_heartbeat_hz: float = 1.0
+    mavlink_state_hz: float = 5.0
 
 
 @dataclass

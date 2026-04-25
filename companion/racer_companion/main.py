@@ -13,6 +13,7 @@ import sys
 import time
 
 from . import config as cfg_mod
+from . import mavlink as mavlink_mod
 from . import msp
 from . import nav
 from . import safety as safety_mod
@@ -44,6 +45,22 @@ def main() -> int:
         log.info("MSP client open on %s @ %d", cfg.companion.serial_port, cfg.companion.baud)
     else:
         log.warning("DRY RUN — no serial port opened")
+
+    mav_sender: mavlink_mod.MavlinkSender | None = None
+    if cfg.companion.mavlink_publisher and not args.dry_run:
+        try:
+            pub = mavlink_mod.make_publisher(cfg.companion.mavlink_publisher)
+            mav_sender = mavlink_mod.MavlinkSender(
+                pub,
+                mavlink_mod.SenderConfig(
+                    heartbeat_hz=cfg.companion.mavlink_heartbeat_hz,
+                    state_hz=cfg.companion.mavlink_state_hz,
+                ),
+            )
+            log.info("MAVLink publisher: %s", cfg.companion.mavlink_publisher)
+        except Exception as e:
+            log.warning("MAVLink publisher init failed (%s) — continuing without", e)
+            mav_sender = None
 
     ctx = state_mod.StateContext()
     last_gps: msp.GpsReading | None = None
@@ -149,6 +166,18 @@ def main() -> int:
                 }) + "\n")
                 log_fh.flush()
 
+            if mav_sender is not None:
+                mav_sender.tick(
+                    now=t0,
+                    state_name=new_state.name,
+                    distance_m=min(distance, 1e6),  # cap the 1e9 sentinel
+                    alt_m=current_alt_m,
+                    heading_deg=current_heading,
+                    state_code=new_state.value,
+                    safety_bitmap=mavlink_mod.safety_bitmap_from_reasons(status.reasons),
+                    status_text=(", ".join(status.reasons[:3]) if status.reasons else None),
+                )
+
             elapsed = time.monotonic() - t0
             if elapsed < loop_dt:
                 time.sleep(loop_dt - elapsed)
@@ -159,6 +188,8 @@ def main() -> int:
             client.close()
         if log_fh is not None:
             log_fh.close()
+        if mav_sender is not None:
+            mav_sender.close()
 
     return 0
 
