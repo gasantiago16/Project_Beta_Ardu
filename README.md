@@ -9,6 +9,10 @@
 ```
 Project_Beta_Ardu/
 ├── README.md                       # this file — architectural plan + rationale
+├── ROADMAP.md                      # what's shipped, what's deferred + triggers
+├── HARDWARE_BOM.md                 # parts list with prices and links
+├── .github/workflows/tests.yml     # CI: pytest + Lua syntax check on push
+├── scripts/check_lua_syntax.py     # CI helper, runnable locally
 ├── docs/                           # phase-by-phase build instructions
 │   ├── 00_START_HERE.md            # read first
 │   ├── 01_phase0_gps_rescue.md     # GPS Rescue per drone (safety floor)
@@ -17,7 +21,10 @@ Project_Beta_Ardu/
 │   ├── 04_phase2_controller.md
 │   ├── 05_phase3_field_drills.md
 │   ├── 06_phase4_race_day.md
-│   └── safety_runbook.md           # cross-cutting safety doctrine
+│   ├── safety_runbook.md           # cross-cutting safety doctrine
+│   ├── drill_log.md                # per-drill PASS/FAIL log template
+│   ├── incident_log.md             # post-mortem template + rules
+│   └── sign_offs.md                # per-drone drill sign-offs
 ├── companion/                      # Python companion software
 │   ├── racer_companion/            # main package
 │   │   ├── msp.py                  # MSP v1 wire protocol

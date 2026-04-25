@@ -1,0 +1,36 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  python-tests:
+    name: Python (companion)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install companion package
+        working-directory: companion
+        run: pip install -e .
+      - name: Run unit tests
+        working-directory: companion
+        run: python -m unittest discover -s tests -t . -v
+
+  lua-syntax:
+    name: Lua syntax (edgetx_scripts)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install lupa (embedded Lua 5.4)
+        run: pip install lupa
+      - name: Check Lua scripts parse
+        run: python scripts/check_lua_syntax.py
