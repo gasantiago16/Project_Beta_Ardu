@@ -45,6 +45,12 @@ Project_Beta_Ardu/
 │   ├── phase1_msp_companion.diff   # BF CLI snippet for Phase 1
 │   ├── per_drone/                  # versioned per-drone `diff all` dumps
 │   └── README.md
+├── sitl/                           # Betaflight SITL test rig (Docker)
+│   ├── Dockerfile                  # builds BF 4.5.1 SITL target
+│   ├── docker-compose.yml          # one-line up: docker compose up
+│   ├── defaults.txt                # auto-applied Phase 0+1 BF config
+│   ├── start.sh                    # boots SITL + applies defaults
+│   └── README.md
 └── edgetx_scripts/                 # Radio-side EdgeTX Lua scripts
     ├── SCRIPTS/MIXES/racestrt.lua  # Race-start sequencer (one-button auto-launch)
     ├── SCRIPTS/MIXES/safelock.lua  # Forces ACRO+AUX-HIGH = unreachable

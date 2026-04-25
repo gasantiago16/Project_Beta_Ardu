@@ -1,0 +1,62 @@
+name: sitl
+
+# Manually triggered for now. Builds BF SITL container and runs the
+# protocol-layer smoke test against it. ~5 min cold build.
+#
+# Promote to push trigger once we have 30+ successful manual runs and
+# confidence the SITL build is stable.
+on:
+  workflow_dispatch:
+
+jobs:
+  sitl-smoke:
+    name: BF SITL smoke test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build SITL container
+        working-directory: sitl
+        run: docker compose build
+
+      - name: Start SITL
+        working-directory: sitl
+        run: docker compose up -d
+
+      - name: Wait for MSP TCP
+        run: |
+          for i in $(seq 1 60); do
+            if nc -z localhost 5761; then
+              echo "MSP up after ${i}s"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "MSP TCP did not come up"
+          docker compose -f sitl/docker-compose.yml logs
+          exit 1
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install companion
+        working-directory: companion
+        run: pip install -e .
+
+      - name: Run SITL smoke test
+        working-directory: companion
+        env:
+          SITL_TCP: localhost:5761
+        run: python -m unittest tests.test_sitl_smoke -v
+
+      - name: Show SITL logs on failure
+        if: failure()
+        working-directory: sitl
+        run: docker compose logs
+
+      - name: Tear down
+        if: always()
+        working-directory: sitl
+        run: docker compose down

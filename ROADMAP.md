@@ -15,6 +15,21 @@ architectural picture.
 - ✅ EdgeTX Lua scripts — race-start sequencer, safety lock, race HUD
 - ✅ Beginner Lua tutorial + radio setup walkthrough
 - ✅ CI on push (pytest + Lua syntax check)
+- ✅ Hardware BOM (`HARDWARE_BOM.md`) + drill/incident/sign-off log templates
+- ✅ Betaflight SITL test rig (Phase 1 — protocol-layer validation, no physics)
+
+## Shipped — v0.2 (Apr 25 2026)
+
+- ✅ `MspClient` accepts `tcp://host:port` URI — companion talks MSP-over-TCP
+  to BF SITL with zero config changes beyond the port string
+- ✅ `sitl/Dockerfile` builds BF 4.5.1 SITL target, applies Phase 0+1 defaults
+  on container boot
+- ✅ `sitl/docker-compose.yml` for one-line up
+- ✅ `companion/tests/test_msp_tcp.py` — TCP adapter tests with embedded
+  fake MSP server (always run)
+- ✅ `companion/tests/test_sitl_smoke.py` — env-gated smoke test against
+  real SITL (MSP_API_VERSION + MSP_FC_VARIANT + SET_RAW_RC round-trip)
+- ✅ `.github/workflows/sitl.yml` — manual-trigger CI workflow
 
 ## Deferred
 
@@ -30,15 +45,15 @@ architectural picture.
 
 **Effort estimate:** 2 weekends of focused work. Park until a pilot says "the Pi is too heavy."
 
-### Betaflight SITL integration
+### Betaflight SITL — closed-loop physics (Phase 2)
 
-**Status:** deferred. **Trigger to revisit:** field-test debug cycle becomes the bottleneck.
+**Status:** Phase 1 (protocol layer) **shipped** in v0.2 — see `sitl/`. Phase 2 (closed-loop physics for tuning) deferred. **Trigger to revisit:** controller tuning becomes the bottleneck.
 
-**Why deferred:** today the test loop is `change code → SCP to Pi → run on bench`. Acceptable for a small team. SITL would let us run companion against a simulated FC + drone in Gazebo entirely on the laptop.
+**What's shipped:** SITL container exposes BF MSP on TCP 5761. Companion connects via `tcp://`. Smoke test validates protocol-layer claims (override semantics, frame parsing). Catches BF-version drift.
 
-**What it'd look like:** [Betaflight has an experimental SITL](https://betaflight.com/docs/development/autopilot/SITL_Autopilot_Testing_Gazebo) (Gazebo-based). Wire `racer_companion` to it via a virtual serial port. Replace `tools/replay_synth.py` (which fakes only GPS, ignores quad physics) with full closed-loop sim.
+**What's deferred:** Gazebo or RealFlight wiring to BF's UDP sensor/motor ports for actual quad physics. Lets us tune `nav.pitch_kp_per_m`/`yaw_kp` against simulated dynamics before the bench. Today's `tools/replay_synth.py` is a poor man's substitute (kinematic only, no real flight model).
 
-**Effort estimate:** 1 weekend to get hello-world working, 2–3 to make it useful. Punt until field iteration is painful.
+**Effort estimate:** 1 weekend to wire Gazebo to SITL, ~1 more to harden + add to CI. Defer until someone says "I want to tune in sim."
 
 ### MAVLink-over-CRSF telemetry forward (companion → radio HUD)
 

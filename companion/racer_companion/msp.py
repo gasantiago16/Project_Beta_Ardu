@@ -151,10 +151,45 @@ def decode_rc(payload: bytes) -> list[int]:
     return list(struct.unpack(f"<{n}H", payload))
 
 
+class _TcpSerialAdapter:
+    """Quacks like pyserial.Serial but talks to a TCP MSP endpoint.
+
+    Used for SITL testing — `port = tcp://host:port` connects to a
+    Betaflight SITL instance. Same MSP wire protocol, different transport.
+    """
+
+    def __init__(self, host: str, port: int):
+        import socket  # lazy
+        self.sock = socket.create_connection((host, port))
+        self.sock.setblocking(False)
+
+    def read(self, n: int) -> bytes:
+        try:
+            data = self.sock.recv(n)
+            return data if data is not None else b""
+        except (BlockingIOError, InterruptedError):
+            return b""
+
+    def write(self, data: bytes) -> int:
+        self.sock.sendall(data)
+        return len(data)
+
+    def close(self) -> None:
+        try:
+            self.sock.close()
+        except OSError:
+            pass
+
+
 class MspClient:
     def __init__(self, port: str, baud: int = 115200, timeout: float = 0.0):
-        import serial  # lazy: lets the module import without pyserial for offline tests
-        self.ser = serial.Serial(port, baud, timeout=timeout)
+        if port.startswith("tcp://"):
+            host_port = port[len("tcp://"):]
+            host, p = host_port.rsplit(":", 1)
+            self.ser = _TcpSerialAdapter(host, int(p))
+        else:
+            import serial  # lazy: lets the module import without pyserial for offline tests
+            self.ser = serial.Serial(port, baud, timeout=timeout)
         self.buf = bytearray()
 
     def close(self) -> None:

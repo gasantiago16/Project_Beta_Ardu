@@ -1,0 +1,12 @@
+services:
+  betaflight-sitl:
+    build:
+      context: .
+      args:
+        BETAFLIGHT_REF: 4.5.1
+    container_name: project-beta-ardu-sitl
+    ports:
+      - "5761:5761"   # MSP / CLI TCP
+      - "9002:9002/udp"
+      - "9003:9003/udp"
+    restart: unless-stopped

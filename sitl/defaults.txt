@@ -1,0 +1,22 @@
+# Betaflight SITL config defaults for Project_Beta_Ardu.
+# Applied automatically by start.sh on container boot. If apply fails,
+# paste these lines into the Configurator CLI tab against the SITL.
+
+# Phase 0 — GPS Rescue
+set failsafe_procedure = GPS_RESCUE
+set failsafe_delay = 4
+set failsafe_off_delay = 10
+set gps_provider = UBLOX
+set gps_rescue_min_sats = 8
+set gps_rescue_alt_mode = MAX_ALT
+set gps_rescue_initial_climb = 10
+set gps_rescue_descent_dist = 20
+set gps_rescue_landing_alt = 4
+set gps_rescue_throttle_hover = 1300
+set gps_rescue_min_dth = 50
+set mag_hardware = NONE
+
+# Phase 1 — MSP override
+set msp_override_channels_mask = 15
+
+save
