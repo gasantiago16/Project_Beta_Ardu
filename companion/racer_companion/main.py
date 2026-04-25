@@ -3,6 +3,19 @@
 Safety invariant: this loop sends MSP_SET_RAW_RC only when state machine
 returns is_active() True. In any other state it stays silent; BF reverts
 to RX values via its MSP-override timeout (~500ms on BF 4.5+).
+
+The FlightController abstraction (BetaflightAdapter today) owns all wire-
+level state — telemetry decoding, polling cadence, flight-mode tracking.
+This loop deals only in TelemetrySnapshot + a few derived booleans.
+
+Tick ordering matters and is non-obvious:
+  1. fc.tick() — consume bytes, refresh snapshot, request next telem batch.
+  2. Compute distance/bearing/heading_err from the snapshot's GPS+attitude.
+  3. Update sliding-window trackers (heading divergence) using prior state.
+  4. Evaluate safety using prior state for runaway/in_transit checks.
+  5. Step state machine with the new safety_ok.
+  6. Compute RC, gating climb_phase / in_hold by the NEW state.
+  7. fc.send_overrides() only if new state is_active().
 """
 from __future__ import annotations
 
@@ -18,6 +31,7 @@ from . import msp
 from . import nav
 from . import safety as safety_mod
 from . import state as state_mod
+from .fc.betaflight import BetaflightAdapter
 
 log = logging.getLogger("racer_companion")
 
@@ -27,6 +41,9 @@ def main() -> int:
     p.add_argument("--config", required=True)
     p.add_argument("--dry-run", action="store_true",
                    help="Do not open serial, do not send MSP. Logs decisions only.")
+    p.add_argument("--record", default=None,
+                   help="Tee every MSP byte to/from the FC into a JSONL file at "
+                        "this path. Replay later with `python -m tools.replay`.")
     p.add_argument("--log-level", default="INFO")
     args = p.parse_args()
 
@@ -39,12 +56,19 @@ def main() -> int:
     log.info("waypoint=%.7f,%.7f alt=%.1fm",
              cfg.waypoint.lat_deg, cfg.waypoint.lon_deg, cfg.waypoint.alt_m)
 
-    client: msp.MspClient | None = None
+    fc: BetaflightAdapter | None = None
     if not args.dry_run:
-        client = msp.MspClient(cfg.companion.serial_port, cfg.companion.baud)
-        log.info("MSP client open on %s @ %d", cfg.companion.serial_port, cfg.companion.baud)
+        fc = BetaflightAdapter.open(
+            cfg.companion.serial_port, cfg.companion.baud,
+            telemetry_period_s=1.0 / cfg.companion.telemetry_hz,
+            record_path=args.record,
+        )
+        log.info("FC open on %s @ %d%s",
+                 cfg.companion.serial_port, cfg.companion.baud,
+                 f" (recording → {args.record})" if args.record else "")
     else:
-        log.warning("DRY RUN — no serial port opened")
+        log.warning("DRY RUN — no serial port opened; loop will run IDLE only "
+                    "(safety blocks while telemetry is absent).")
 
     mav_sender: mavlink_mod.MavlinkSender | None = None
     if cfg.companion.mavlink_publisher and not args.dry_run:
@@ -63,77 +87,79 @@ def main() -> int:
             mav_sender = None
 
     ctx = state_mod.StateContext()
-    last_gps: msp.GpsReading | None = None
-    last_attitude: msp.AttitudeReading | None = None
-    last_altitude: msp.AltitudeReading | None = None
-    last_analog: msp.AnalogReading | None = None
-    last_rc: list[int] | None = None
     home_lat: float | None = None
     home_lon: float | None = None
+    heading_tracker = safety_mod.HeadingDivergenceTracker()
 
     loop_dt = 1.0 / cfg.companion.loop_hz
-    telem_dt = 1.0 / cfg.companion.telemetry_hz
-    last_telem = 0.0
-
     log_fh = open(cfg.companion.log_path, "a") if cfg.companion.log_path else None
 
     try:
         while True:
             t0 = time.monotonic()
 
-            if client is not None:
-                for cmd, payload in client.poll():
-                    if cmd == msp.MSP_RAW_GPS:
-                        last_gps = msp.decode_raw_gps(payload)
-                        if (home_lat is None and last_gps.fix
-                                and last_gps.num_sat >= cfg.safety.min_satellites):
-                            home_lat = last_gps.lat_deg
-                            home_lon = last_gps.lon_deg
-                            log.info("Home set: %.7f, %.7f", home_lat, home_lon)
-                    elif cmd == msp.MSP_ATTITUDE:
-                        last_attitude = msp.decode_attitude(payload)
-                    elif cmd == msp.MSP_ALTITUDE:
-                        last_altitude = msp.decode_altitude(payload)
-                    elif cmd == msp.MSP_ANALOG:
-                        last_analog = msp.decode_analog(payload)
-                    elif cmd == msp.MSP_RC:
-                        last_rc = msp.decode_rc(payload)
+            # ── FC tick (poll, decode, periodic telem requests) ──────────
+            snap = fc.tick(t0) if fc is not None else _empty_snapshot()
 
-            if t0 - last_telem > telem_dt:
-                if client is not None:
-                    client.send(msp.MSP_RAW_GPS)
-                    client.send(msp.MSP_ATTITUDE)
-                    client.send(msp.MSP_ALTITUDE)
-                    client.send(msp.MSP_ANALOG)
-                    client.send(msp.MSP_RC)
-                last_telem = t0
+            # Set home on first GPS fix that meets sat-count requirement.
+            if (home_lat is None and snap.gps is not None and snap.gps.fix
+                    and snap.gps.num_sat >= cfg.safety.min_satellites):
+                home_lat = snap.gps.lat_deg
+                home_lon = snap.gps.lon_deg
+                log.info("Home set: %.7f, %.7f", home_lat, home_lon)
 
             aux_active = (
-                last_rc is not None
-                and len(last_rc) > cfg.companion.aux_channel_index
-                and last_rc[cfg.companion.aux_channel_index] >= cfg.companion.aux_active_us_min
+                snap.rc is not None
+                and len(snap.rc) > cfg.companion.aux_channel_index
+                and snap.rc[cfg.companion.aux_channel_index] >= cfg.companion.aux_active_us_min
             )
 
+            # ── Compute geometry without commanding RC yet ─────────────────
+            current_alt_m = snap.altitude.alt_cm / 100.0 if snap.altitude else 0.0
+            current_heading = snap.attitude.yaw_deg if snap.attitude else 0.0
+            vario = snap.altitude.vario_cms if snap.altitude else 0
+            if snap.gps is not None and snap.gps.fix:
+                distance = nav.haversine_m(
+                    snap.gps.lat_deg, snap.gps.lon_deg,
+                    cfg.waypoint.lat_deg, cfg.waypoint.lon_deg,
+                )
+                target_bearing = nav.bearing_deg(
+                    snap.gps.lat_deg, snap.gps.lon_deg,
+                    cfg.waypoint.lat_deg, cfg.waypoint.lon_deg,
+                )
+                heading_err = nav.heading_error_deg(target_bearing, current_heading)
+            else:
+                distance = 1e9
+                target_bearing = 0.0
+                heading_err = 0.0
+
+            # ── Sliding-window trackers (uses prior tick's state) ─────────
+            prev_state = ctx.state
+            # Feed every TRANSIT-state sample to the tracker, regardless of
+            # err magnitude. The tracker fires when sustained err exceeds
+            # threshold — gating on small err here would mean the watchdog
+            # only listens when there's nothing wrong, defeating its purpose.
+            # (If you re-add a gate here, make sure threshold_deg is below
+            # the gate threshold or the tracker becomes silent dead code.)
+            transit_active = (prev_state == state_mod.State.TRANSIT)
+            heading_diverged = heading_tracker.update(t0, heading_err, transit_active)
+            acro_check = fc.is_acro_active() if fc is not None else None
+            # Fail-open on None (BOXNAMES not yet primed) — safelock.lua is the
+            # primary defense and the runbook gates field operation on it.
+            acro_active = (acro_check is True)
+
+            # ── Safety eval ────────────────────────────────────────────────
             status = safety_mod.evaluate(
                 cfg.safety, home_lat, home_lon,
-                last_gps, last_altitude, last_attitude, last_analog, t0,
+                snap.gps, snap.altitude, snap.attitude, snap.analog, t0,
+                last_rc_received_at=snap.rc_received_at,
+                distance_to_target_m=distance,
+                in_transit=(prev_state == state_mod.State.TRANSIT),
+                heading_diverged=heading_diverged,
+                acro_active=acro_active,
             )
 
-            current_alt_m = last_altitude.alt_cm / 100.0 if last_altitude else 0.0
-            current_heading = last_attitude.yaw_deg if last_attitude else 0.0
-            vario = last_altitude.vario_cms if last_altitude else 0
-            if last_gps is not None and last_gps.fix:
-                rc, dbg = nav.compute_rc(
-                    cfg.waypoint, last_gps.lat_deg, last_gps.lon_deg,
-                    last_altitude.alt_cm if last_altitude else 0,
-                    current_heading, vario, cfg.nav,
-                )
-                distance = dbg["distance_m"]
-            else:
-                rc = [1500] * 8
-                rc[msp.CH_THROTTLE] = cfg.nav.throttle_hover
-                distance = 1e9
-
+            # ── State step ────────────────────────────────────────────────
             new_state = state_mod.step(
                 ctx, now=t0,
                 aux_companion_active=aux_active,
@@ -145,11 +171,29 @@ def main() -> int:
                 arrival_dwell_s=cfg.companion.arrival_dwell_s,
             )
 
+            # ── RC compute (uses new state for climb-phase / hold gating) ─
+            climb_phase = (
+                new_state == state_mod.State.CLIMB
+                and current_alt_m < 0.8 * cfg.companion.climb_target_alt_m
+            )
+            in_hold = (new_state == state_mod.State.HOLD)
+            if snap.gps is not None and snap.gps.fix:
+                rc, _dbg = nav.compute_rc(
+                    cfg.waypoint, snap.gps.lat_deg, snap.gps.lon_deg,
+                    snap.altitude.alt_cm if snap.altitude else 0,
+                    current_heading, vario, cfg.nav,
+                    climb_phase=climb_phase,
+                    in_hold=in_hold,
+                )
+            else:
+                rc = [1500] * 8
+                rc[msp.CH_THROTTLE] = cfg.nav.throttle_hover
+
             rc_sent: list[int] | None = None
             if state_mod.is_active(new_state):
                 rc_sent = safety_mod.clamp_rc(rc)
-                if client is not None:
-                    client.send_raw_rc(rc_sent)
+                if fc is not None:
+                    fc.send_overrides(rc_sent)
 
             if log_fh is not None:
                 log_fh.write(json.dumps({
@@ -161,7 +205,11 @@ def main() -> int:
                     "rc_sent": rc_sent,
                     "alt_m": current_alt_m,
                     "heading_deg": current_heading,
+                    "heading_err_deg": heading_err,
                     "distance_m": distance,
+                    "climb_phase": climb_phase,
+                    "in_hold": in_hold,
+                    "acro_active": acro_active,
                     "home": [home_lat, home_lon],
                 }) + "\n")
                 log_fh.flush()
@@ -184,14 +232,20 @@ def main() -> int:
     except KeyboardInterrupt:
         log.info("Shutting down (KeyboardInterrupt)")
     finally:
-        if client is not None:
-            client.close()
+        if fc is not None:
+            fc.close()
         if log_fh is not None:
             log_fh.close()
         if mav_sender is not None:
             mav_sender.close()
 
     return 0
+
+
+def _empty_snapshot():
+    """Empty snapshot for dry-run mode (no FC, no telemetry)."""
+    from .fc.protocol import TelemetrySnapshot
+    return TelemetrySnapshot()
 
 
 if __name__ == "__main__":

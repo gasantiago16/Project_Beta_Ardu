@@ -23,23 +23,50 @@ project state.
 
 ---
 
-## Snapshot — v0.3 (Apr 25 2026)
+## Snapshot — v0.5 (Apr 25 2026, capability + quality pass)
 
 | Component | Status | Validated |
 |-----------|--------|-----------|
 | Plan + architecture (`README.md`) | ✅ shipped | — |
-| Companion Python library (`companion/`) | ✅ shipped | 71 unit tests on push CI |
-| Betaflight CLI configs (`bf_config/`) | ✅ shipped, **no real BF flashed yet** | — |
+| Companion Python library (`companion/`) | ✅ shipped | 159 unit tests + 9 hypothesis property tests on push CI |
+| Betaflight CLI configs (`bf_config/`) | ✅ shipped, **no real BF flashed yet** | preflight_validator + `example_manifest.txt` |
 | Per-phase build docs (`docs/`) | ✅ shipped | — |
-| EdgeTX Lua scripts (`edgetx_scripts/`) | ✅ shipped, **no radio provisioned yet** | Lupa parse check on push CI |
+| EdgeTX Lua scripts (`edgetx_scripts/`) | ✅ shipped, **no radio provisioned yet** | Lupa parse + 11 logic tests on push CI |
 | Hardware BOM (`HARDWARE_BOM.md`) | ✅ shipped | — |
 | Drill / incident / sign-off log templates | ✅ shipped, **empty** | — |
-| BF SITL test rig (`sitl/`) | ✅ shipped, **container not yet built** | manual-trigger CI workflow |
-| MAVLink publisher (`racer_companion/mavlink.py`) | ✅ shipped | byte-for-byte vs pymavlink 2.4.49 |
+| BF SITL test rig (`sitl/`) | ✅ shipped, **container not yet built** | manual-trigger CI; readback asserts mask=15 + mag=NONE on boot |
+| MAVLink publisher (`racer_companion/mavlink.py`) | ✅ shipped | HEARTBEAT + STATUSTEXT byte-for-byte + COMPANION_STATE round-trip vs pymavlink 2.4.49 |
 | QGroundControl on phone setup | ✅ documented, **not yet field-verified** | — |
+| Companion-side ACRO check (MSP_STATUS_EX) | ✅ shipped | unit tests; fail-open until BOXNAMES received (safelock.lua remains primary) |
+| Heading-divergence watchdog | ✅ shipped | unit + integration tests; gate is `state==TRANSIT` (NO err filter — see Sharp edges) |
+| FlightController abstraction (`fc/`) | ✅ shipped | Protocol + BetaflightAdapter (only impl); `is_acro_active`, `tick()→TelemetrySnapshot` |
+| Byte-level MSP recorder (`recorder.py`) | ✅ shipped + wired | `--record <path>` on main.py; 11 round-trip tests + integration test |
+| HOLD position controller (`nav.hold_command_us`) | ✅ shipped | body-frame P, NaN-guarded, heading=0/90/180/270 sign-tested |
+| Pre-flight config validator (`scripts/preflight_validator.py`) | ✅ shipped | 18 tests; case-insensitive enums only, name fields strict |
+| Heading-threshold tuning harness (`scripts/tune_heading_threshold.py`) | ✅ shipped, **needs first real flight log** | 12 tests; ASCII output; reports trip_edges + tripped_seconds |
+| Property-based tests (`test_safety_properties.py`) | ✅ shipped | hypothesis>=6.100; FRESH_RECEIVED_AT strategy + lat/lon poles + antimeridian |
 
-**8 commits on `main`** (`55d7342` → `391e575`). Two CI workflows: `tests.yml`
-on every push (currently 13–24s, all green), `sitl.yml` manual-trigger.
+### v0.5 changes (capability + quality pass following 6-agent peer review + holistic review)
+- **FC abstraction (`fc/`)**: FlightController Protocol + BetaflightAdapter wrapping MspClient + FlightModeReader. main.py now consumes a typed TelemetrySnapshot per tick. Future ports (INAV / ArduPilot) implement the Protocol; nav/state/safety stay unchanged.
+- **Byte-level MSP recorder + replay**: `recorder.RecordingAdapter` tees every byte to a JSONL file; `tools.replay` (run as `python -m tools.replay`) re-feeds the bytes through the parser offline. Wire via `--record <path>` on main.py. Field incidents become reproducible.
+- **HOLD wind correction (`nav.hold_command_us`)**: body-frame P controller with small gains (8 us/m, ±60us cap) replaces centered-sticks behavior. Drone now lazily opposes wind drift inside the hold disc; state.py still kicks back to TRANSIT past `arrival_radius_m × 1.5`.
+- **Pre-flight validator (`scripts/preflight_validator.py`)**: diff a per-drone manifest against an FC `dump`, exit 1 on mismatch. `bf_config/per_drone/example_manifest.txt` defines the safety floor (`mask=15`, `mag_hardware=NONE`). Same idea as the SITL boot-time readback, but for real drones.
+- **Heading-threshold tuning harness (`scripts/tune_heading_threshold.py`)**: replay a flight log through the divergence tracker across a grid of (threshold, window); report both trip_edges and tripped_seconds. ASCII output (Windows-console safe). Uses `state == TRANSIT` gate to match what main.py feeds the live tracker.
+- **Property-based safety tests**: hypothesis-driven invariants on clamp, evaluate(), HeadingDivergenceTracker. `FRESH_RECEIVED_AT` strategy makes the `ok=True` branch reachable; lat/lon include poles and antimeridian.
+- **Heading-tracker engagement gate corrected** (holistic review finding): the `pitching_forward` boolean used to additionally gate on `|heading_err| < 25°`, which combined with the 60° threshold meant the watchdog could NEVER trip. Now `transit_active = (state == TRANSIT)` only — feeds every TRANSIT-state sample to the tracker.
+
+### v0.4 changes (defense-in-depth pass following ultrareview)
+- **BUG-1**: `safety.evaluate` now blocks on `analog is None` (was silently OK; loose VBAT pad would pass). Same fix for stale_analog.
+- **BUG-2**: state machine — HOLD now re-engages TRANSIT when drift > `arrival_radius_m × 1.5`. Wind in HOLD used to hold centered sticks while drifting.
+- **BUG-3**: `safety.max_distance_from_target_during_transit_m` was a dead config field; now wired as `transit_runaway_*m` reason while in TRANSIT.
+- **BUG-4**: `nav.compute_rc(climb_phase=True)` zeros roll/pitch/yaw during CLIMB until current alt ≥ 80% of target — kills the downhill-takeoff treeline hazard.
+- **stale_rc**: companion now reports when MSP_RC stops arriving (was invisible).
+- **heading_diverged**: sliding-window watchdog catches mag-NONE yaw drift before geofence does.
+- **acro_active**: companion subscribes MSP_STATUS_EX + MSP_BOXNAMES, decodes ANGLE/HORIZON box bits, refuses overrides if BF is in ACRO. Defense-in-depth alongside `safelock.lua`.
+- **Lua logic harness**: `scripts/test_lua_logic.py` drives `racestrt.lua`'s state machine and `safelock.lua`'s threshold logic via lupa with controlled time. Catches transition bugs that parse-only check missed.
+- **SITL readback**: `sitl/start.sh` now hard-fails if `msp_override_channels_mask = 15` or `mag_hardware = NONE` is missing from the dump after defaults applied. Was best-effort with a misleading "WARNING" before.
+
+**Tests now: 105 Python (102 always-run + 3 SITL env-gated) + 11 Lua logic.**
 
 **No drones built yet.** All progress is software + documentation. Field
 work begins with the first pilot doing Phase 0.
@@ -117,7 +144,7 @@ beyond a $25 GPS module.
 | MAVLink command ingest by BF | BF is MAVLink-tx-to-GCS only. Doesn't accept commands. |
 | ML / learned controller | A P-controller is debuggable in 50 lines. Failure modes obvious. |
 | Pre-commit hooks (ruff/black/lualint) | Adds friction before codebase has stabilized. Revisit after 5+ contributors. |
-| CI MAVLink publisher integration test | pymavlink as runtime dep is heavy. Tests use byte-for-byte ground truth instead — same effect, no dep. |
+| CI MAVLink publisher integration test | pymavlink as runtime dep is heavy. Added as DEV dep (`requirements-dev.txt`) on 2026-04-25 for cross-validation tests only — companion runtime stays pyserial-only. |
 | Pi 3B+/4 as companion | Too heavy and power-hungry. Pi Zero 2W = same compute, 1/3 the weight. |
 | Beitian / no-name GPS modules | Tied to most BF Rescue flyaway reports. Stick to Matek / HGLRC / known-vendor M10. |
 
@@ -152,7 +179,8 @@ in flight. **Read this list before any change to the load-bearing files.**
   in `docs/01_phase0_gps_rescue.md`.
 - **`msp_override_channels_mask = 15`** must be set, otherwise the companion
   silently has no effect (BF sends RX values regardless of MSP). Check
-  `bf_config/per_drone/<drone>.txt` if behavior is wrong.
+  `bf_config/per_drone/<drone>.txt` if behavior is wrong. SITL boot now
+  reads back the dump and fails loudly if this isn't set.
 - **Companion "active" gate is `state.is_active(state)`** — any state other
   than `CLIMB`/`TRANSIT`/`HOLD` returns `False` and the loop sends NO
   `MSP_SET_RAW_RC`. This is intentional — silence triggers BF's MSP
@@ -162,6 +190,56 @@ in flight. **Read this list before any change to the load-bearing files.**
   so the first call to `tick()` always emits both. Setting them to 0
   re-introduces the cold-start bug where no telemetry is sent until enough
   time has elapsed.
+- **Telemetry-absent must trip safety, not just telemetry-stale.** Mirror
+  the GPS pattern: `if foo is None: reasons.append("no_foo_telemetry")`,
+  THEN check staleness, THEN check value bounds. The original code only
+  checked stale_* and value bounds for analog → a loose VBAT pad silently
+  passed. Same logic for any new telemetry stream.
+- **Lua state-machine output is one-tick-delayed after a transition.**
+  `racestrt.lua` sets outputs from the OLD state, then transitions; the
+  NEW state's outputs appear on the next tick. ABORT is the exception
+  (checked at the top of run() so it takes effect same-tick). The Lua
+  logic harness encodes this; preserve it if you refactor.
+- **`HeadingDivergenceTracker` resets when not pitching forward.** If you
+  add code that pitches forward outside TRANSIT (e.g., a new "approach"
+  state), update the `pitching_forward` predicate in `main.py` or the
+  watchdog goes silent.
+- **`FlightModeReader` is fail-open until `MSP_BOXNAMES` arrives.** Until
+  the bit-index map is known, `acro_active` reads as `False`. `safelock.lua`
+  (radio-side) is the primary defense; this is belt-and-suspenders. Don't
+  rely on the companion-side check alone.
+- **`HeadingDivergenceTracker` MUST NOT be gated on small heading error.**
+  The tracker fires when the windowed mean of `|err|` exceeds threshold.
+  If `main.py` only feeds it samples where `|err|` is already small (e.g.,
+  the old `|err| < yaw_align_threshold_deg` gate), the tracker is silent
+  dead code — it never sees the divergence it's supposed to catch. The
+  caller-passed `pitching_forward` parameter is misnamed; it actually
+  means "is the bearing controller active" and should be `state == TRANSIT`
+  with no additional err filter. Holistic review found this on Apr 25 2026.
+- **`is_acro_active()` does not consult ARM.** Neither-ANGLE-nor-HORIZON
+  reads as ACRO even when the FC is disarmed. This is intentional fail-
+  active for the safety use, but a future maintainer expecting an arm
+  check (e.g., to suppress a warning while the FC is disarmed) won't get
+  one. `safelock.lua` and the runbook gate the actual flight-mode discipline.
+- **`tools/` is a sibling of `racer_companion/`, not a sub-package.**
+  `python -m tools.replay` from `companion/` works; `python -m
+  racer_companion.tools.replay` does NOT exist. Same convention as
+  `tools.msp_loopback_test` and `tools.replay_synth`.
+- **`TelemetrySnapshot` returned by `BetaflightAdapter.tick()` is a copy.**
+  Each call returns a fresh `dataclasses.replace(...)` instance so callers
+  may safely retain it across ticks for diff/replay. Don't change `tick()`
+  to return the internal mutable snapshot — it's load-bearing for any
+  diff-based consumer.
+- **`RecordingAdapter._emit` swallows OSError on write.** A disk-full or
+  pipe-closed during a flight must NOT take the FC link down. Once
+  `_fh_dead` flips, no further log lines are emitted that session — the
+  flight continues, the recording just stops mid-way. This is intentional;
+  rotating the log mid-flight is out of scope.
+- **`preflight_validator._normalize` is case-insensitive ONLY for uniformly-
+  cased single-token alphanumeric values.** `none`/`NONE`/`MAX_ALT` match
+  case-insensitively (BF emits enums uppercase but accepts either). Mixed-
+  case values like `Alex1` or `craft_name = SteelEagle` stay strict — a
+  wrong-case name in a name field would silently match otherwise.
 
 ### Test discipline
 - **74 tests, 71 always-run + 3 SITL env-gated.** When you add a new module,
@@ -333,4 +411,4 @@ periodically.
 - **Don't bloat.** If a topic grows past 30 lines, link to its own
   document instead. This file should stay scannable in under 10 minutes.
 
-Last touched: Apr 25 2026, v0.3, commit `391e575`.
+Last touched: Apr 25 2026, v0.5 (capability + quality pass + holistic-review fixes), branch `safety-defense-in-depth`.

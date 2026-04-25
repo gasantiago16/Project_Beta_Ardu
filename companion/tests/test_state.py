@@ -77,6 +77,30 @@ class TestStateMachine(unittest.TestCase):
         self.assertTrue(sm.is_active(sm.State.TRANSIT))
         self.assertTrue(sm.is_active(sm.State.HOLD))
 
+    def test_hold_drifts_back_to_transit(self):
+        # BUG-2 fix: drone in HOLD that drifts past arrival_radius * hysteresis
+        # must re-enter TRANSIT for active correction.
+        # Reach HOLD first.
+        self.step(now=0, aux=True, safety_ok=True)
+        self.step(now=1, aux=True, safety_ok=True, current_alt_m=6.0)
+        self.step(now=2, aux=True, safety_ok=True, current_alt_m=6.0, distance_to_target_m=1.0)
+        s = self.step(now=4.5, aux=True, safety_ok=True, current_alt_m=6.0, distance_to_target_m=1.0)
+        self.assertEqual(s, sm.State.HOLD)
+        # Drift past arrival_radius * 1.5 (3 * 1.5 = 4.5)
+        s = self.step(now=5, aux=True, safety_ok=True, current_alt_m=6.0, distance_to_target_m=10.0)
+        self.assertEqual(s, sm.State.TRANSIT)
+        self.assertEqual(self.ctx.arrival_dwell_start, 0.0)
+
+    def test_hold_holds_within_hysteresis(self):
+        # Drift inside the hysteresis band (radius..radius*1.5) should NOT re-engage.
+        self.step(now=0, aux=True, safety_ok=True)
+        self.step(now=1, aux=True, safety_ok=True, current_alt_m=6.0)
+        self.step(now=2, aux=True, safety_ok=True, current_alt_m=6.0, distance_to_target_m=1.0)
+        self.step(now=4.5, aux=True, safety_ok=True, current_alt_m=6.0, distance_to_target_m=1.0)
+        # Drift to 4m (radius=3, hysteresis*radius=4.5; 4 < 4.5 → stays HOLD).
+        s = self.step(now=5, aux=True, safety_ok=True, current_alt_m=6.0, distance_to_target_m=4.0)
+        self.assertEqual(s, sm.State.HOLD)
+
 
 if __name__ == "__main__":
     unittest.main()

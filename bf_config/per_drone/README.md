@@ -1,8 +1,14 @@
 # Per-drone Betaflight dumps
 
-Each pilot commits a `<pilot>_<drone>.txt` file here containing the output of
-`diff all` from the Betaflight Configurator CLI after applying the phase
-configs and tuning the drone-specific values.
+Two file types live here:
+
+- **`<pilot>_<drone>_phase*.txt`** — the output of `diff all` from the
+  Betaflight Configurator CLI. The state of record. Used for drift
+  detection, recovery, and parameter sharing.
+- **`<pilot>_<drone>_manifest.txt`** — a SHORT subset of `set` lines the
+  pre-flight validator (`scripts/preflight_validator.py`) checks against
+  a fresh `dump`. See `example_manifest.txt` for the floor every drone
+  must satisfy.
 
 ## Why
 
@@ -34,3 +40,22 @@ Examples:
 - Do not commit dumps that include radio bind keys (some receivers expose
   these via CLI). Strip those lines before committing.
 - Do not commit dumps from a drone that hasn't passed Phase 0 bench drills.
+
+## Pre-flight validation
+
+Run before each flight day to catch a partial CLI apply or a forgotten
+`save`:
+
+```
+# 1. SCP the dump from the drone (or paste from Configurator CLI tab):
+scp pi@dronefpv:/tmp/dump.txt /tmp/your_drone_dump.txt
+
+# 2. Validate against manifest (exit 0 = pass, 1 = mismatch, 2 = setup error):
+python scripts/preflight_validator.py \
+    --manifest bf_config/per_drone/example_manifest.txt \
+    --dump     /tmp/your_drone_dump.txt
+```
+
+`example_manifest.txt` is the minimum every drone must satisfy. Copy it
+to `<pilot>_<drone>_manifest.txt` and extend with drone-specific safety
+settings as needed.

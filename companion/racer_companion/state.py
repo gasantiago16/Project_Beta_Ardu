@@ -4,7 +4,9 @@ States:
 - IDLE: silent. RX values flow to BF unchanged.
 - CLIMB: companion-active AUX high, climb to target altitude.
 - TRANSIT: at altitude, fly to waypoint.
-- HOLD: arrived. Centered sticks + hover throttle.
+- HOLD: arrived. Centered sticks + hover throttle. Re-engages TRANSIT if
+        the drone drifts past `arrival_radius_m * HOLD_RECHECK_HYSTERESIS`
+        (wind drift).
 - RELEASED: safety violated. Sticky until AUX cycled to low (operator confirms).
 
 Companion sends MSP_SET_RAW_RC only in CLIMB/TRANSIT/HOLD (is_active()==True).
@@ -16,6 +18,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum, auto
+
+# Multiplier on arrival_radius_m. If a drone in HOLD drifts past this it
+# re-enters TRANSIT for active correction. >1.0 provides spatial hysteresis
+# so a hovering drone doesn't ping-pong between HOLD and TRANSIT.
+HOLD_RECHECK_HYSTERESIS = 1.5
 
 
 class State(Enum):
@@ -69,6 +76,14 @@ def step(
         else:
             ctx.arrival_dwell_start = 0.0
             nxt = State.TRANSIT
+    elif prev == State.HOLD:
+        # Wind drift: if we've drifted out of the hold disc, re-engage TRANSIT
+        # for active correction. Hysteresis (>1× radius) prevents ping-pong.
+        if distance_to_target_m > arrival_radius_m * HOLD_RECHECK_HYSTERESIS:
+            ctx.arrival_dwell_start = 0.0
+            nxt = State.TRANSIT
+        else:
+            nxt = State.HOLD
     else:
         nxt = State.HOLD
 

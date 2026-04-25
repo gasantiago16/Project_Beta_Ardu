@@ -1,5 +1,11 @@
 #!/usr/bin/env bash
 # Boot Betaflight SITL, then apply our defaults via the CLI TCP port.
+#
+# After applying defaults we read the config back and assert on the values
+# the companion's safety story depends on (msp_override_channels_mask=15,
+# mag_hardware=NONE). The original `nc | echo WARNING` path was misleading:
+# a partial config apply would still let the smoke test "pass" while
+# overrides on AUX channels were unbounded. Hard fail instead.
 set -e
 
 echo "[sitl] Starting Betaflight SITL..."
@@ -29,9 +35,33 @@ done
 # the lines verbatim — works on 4.5.x.
 if [ -f defaults.txt ]; then
   echo "[sitl] Applying defaults.txt..."
-  nc -q 2 localhost 5761 < defaults.txt || \
-    echo "[sitl] WARNING: defaults application failed; apply via Configurator CLI tab manually"
+  if ! nc -q 2 localhost 5761 < defaults.txt; then
+    echo "[sitl] FATAL: defaults application failed (nc exit non-zero)"
+    exit 1
+  fi
 fi
+
+# Read back the running config and verify the safety-critical lines.
+# If the config didn't apply (silent FC, wrong baud, partial parse), MSP
+# overrides could engage on AUX channels — pilot can't take the sticks back.
+# Hard-fail rather than continue with a misleading "ready" log.
+echo "[sitl] Verifying applied defaults..."
+DUMP=$(printf 'dump\nexit\n' | nc -q 3 localhost 5761 || true)
+
+assert_setting() {
+  local key="$1"
+  local expected="$2"
+  if ! echo "$DUMP" | grep -qE "^[[:space:]]*${key}[[:space:]]*=[[:space:]]*${expected}[[:space:]]*$"; then
+    echo "[sitl] FATAL: expected '${key} = ${expected}' not present in dump"
+    echo "[sitl] grep result for ${key}:"
+    echo "$DUMP" | grep -E "${key}" || echo "  (no match — setting absent)"
+    exit 1
+  fi
+  echo "[sitl] OK: ${key} = ${expected}"
+}
+
+assert_setting "msp_override_channels_mask" "15"
+assert_setting "mag_hardware" "NONE"
 
 echo "[sitl] Ready. SITL pid=$SITL_PID"
 wait "$SITL_PID"

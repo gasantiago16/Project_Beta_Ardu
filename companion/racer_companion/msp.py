@@ -22,6 +22,8 @@ MSP_RAW_GPS = 106
 MSP_ATTITUDE = 108
 MSP_ALTITUDE = 109
 MSP_ANALOG = 110
+MSP_BOXNAMES = 116
+MSP_STATUS_EX = 150
 MSP_SET_RAW_RC = 200
 
 CH_ROLL = 0
@@ -71,6 +73,15 @@ class AnalogReading:
     mah: int
     rssi: int
     amperage_a: float
+    received_at: float
+
+
+@dataclass
+class StatusReading:
+    """MSP_STATUS_EX subset: just the flightModeFlags bitmap. Bits index into
+    the MSP_BOXNAMES list (which we fetch separately). Used by the companion's
+    FlightModeReader to detect ANGLE vs ACRO."""
+    flight_mode_flags: int
     received_at: float
 
 
@@ -151,6 +162,24 @@ def decode_rc(payload: bytes) -> list[int]:
     return list(struct.unpack(f"<{n}H", payload))
 
 
+def decode_status_ex(payload: bytes) -> StatusReading:
+    """Parse MSP_STATUS_EX. Layout per BF: cycleTime u16 | i2cErrorCount u16
+    | sensor u16 | flightModeFlags u32 | profileIndex u8 | ... (more fields
+    we don't need). We only consume the first 10 bytes."""
+    if len(payload) < 10:
+        raise ValueError("MSP_STATUS_EX payload too short")
+    flags = struct.unpack_from("<I", payload, 6)[0]
+    return StatusReading(flight_mode_flags=flags, received_at=time.monotonic())
+
+
+def decode_box_names(payload: bytes) -> list[str]:
+    """Parse MSP_BOXNAMES. BF returns box names separated by `;`, with a
+    trailing `;` and possible NUL padding. Order is the bit-index order for
+    flightModeFlags in MSP_STATUS_EX."""
+    s = payload.decode("ascii", errors="replace").rstrip("\x00").rstrip(";")
+    return [n for n in s.split(";") if n]
+
+
 class _TcpSerialAdapter:
     """Quacks like pyserial.Serial but talks to a TCP MSP endpoint.
 
@@ -191,6 +220,19 @@ class MspClient:
             import serial  # lazy: lets the module import without pyserial for offline tests
             self.ser = serial.Serial(port, baud, timeout=timeout)
         self.buf = bytearray()
+
+    @classmethod
+    def from_adapter(cls, adapter) -> "MspClient":
+        """Construct an MspClient with a pre-built serial-like adapter,
+        bypassing the auto-`pyserial.Serial(...)` call. Used by recorder /
+        replay tooling and in tests where we don't want to open a real port.
+
+        `adapter` must implement read(n)→bytes, write(data)→int, close()→None.
+        """
+        c = cls.__new__(cls)
+        c.ser = adapter
+        c.buf = bytearray()
+        return c
 
     def close(self) -> None:
         if self.ser is not None:

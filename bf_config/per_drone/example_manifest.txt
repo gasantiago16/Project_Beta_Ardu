@@ -1,0 +1,26 @@
+# Example pre-flight manifest for `scripts/preflight_validator.py`.
+#
+# This is the MINIMUM set of safety-critical settings every Phase-1+ drone
+# must have. Copy to <pilot>_<drone>_manifest.txt and add anything else
+# YOUR drone needs.
+#
+# Validate before each flight day:
+#   python scripts/preflight_validator.py \
+#       --manifest bf_config/per_drone/example_manifest.txt \
+#       --dump     /tmp/your_drone_dump.txt
+#
+# The dump is the output of `dump` from the BF Configurator CLI tab,
+# saved to a file. Validator exits 0 on match, 1 on mismatch, 2 on a
+# setup error (missing file, no `set` lines, etc.).
+#
+# Why these two are the floor:
+# - msp_override_channels_mask: without this, the companion has no effect.
+#   BF silently sends RX values regardless of MSP. Mask=15 = override
+#   only channels 1-4 (AETR), leaving AUX5-16 to the pilot. (Decision #2
+#   in MEMORY.md.)
+# - mag_hardware: mag flyaways are the #1 reported GPS Rescue failure on
+#   race quads (carbon frames, PDB interference). Disabled until
+#   independent calibration. (Decision #6.)
+
+set msp_override_channels_mask = 15
+set mag_hardware = NONE
