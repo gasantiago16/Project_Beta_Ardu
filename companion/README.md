@@ -82,13 +82,19 @@ RX takes over. All three failure modes converge on the same recovery path.
 ## Files
 
 - `racer_companion/msp.py` — MSP v1 wire protocol, encode + decode
-- `racer_companion/nav.py` — bearing/distance + P controllers
+- `racer_companion/fc/` — FlightController abstraction (Protocol + BetaflightAdapter)
+- `racer_companion/nav.py` — bearing/distance + P controllers + HOLD position controller
 - `racer_companion/state.py` — state machine
-- `racer_companion/safety.py` — bounds, geofence, telemetry watchdog
+- `racer_companion/safety.py` — bounds, geofence, telemetry watchdog, divergence trackers
+- `racer_companion/recorder.py` — byte-level MSP record (RecordingAdapter) + replay (ReplayAdapter)
+- `racer_companion/mavlink.py` — MAVLink v2 publisher (UDP / serial)
 - `racer_companion/config.py` — JSON config loader
-- `racer_companion/main.py` — main 50Hz loop
+- `racer_companion/main.py` — main 50Hz loop. Pass `--record <path>` to
+  capture every MSP byte to a JSONL file for offline replay.
 - `tools/msp_loopback_test.py` — bench test against a real BF FC
-- `tools/replay_synth.py` — offline controller replay
+- `tools/replay_synth.py` — offline controller replay (synthetic input)
+- `tools/replay.py` — replay a recorded byte log; run with
+  `python -m tools.replay --log path.jsonl` from `companion/`
 - `tests/test_*.py` — unit tests for protocol + math + state + safety
 - `systemd/racer-companion.service` — auto-start on Pi boot
 

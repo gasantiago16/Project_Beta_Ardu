@@ -115,6 +115,11 @@ def measure_cell(
 
     `trip_edges` = count of False→True transitions (distinct trip events).
     `tripped_seconds` = sum of dt over samples where the tracker is True.
+
+    Engagement gate matches main.py's `transit_active` — `state == "TRANSIT"`
+    only, no error-magnitude filter. If main.py is ever changed to gate
+    differently, this MUST be updated to match or the table will report
+    trip counts the live tracker can't reproduce.
     """
     tracker = HeadingDivergenceTracker(threshold_deg=threshold_deg, window_s=window_s)
     trips = 0
@@ -122,8 +127,8 @@ def measure_cell(
     last = False
     last_t: float | None = None
     for t, err, state in samples:
-        pf = (state == "TRANSIT")
-        tripped = tracker.update(t, err, pf)
+        transit_active = (state == "TRANSIT")
+        tripped = tracker.update(t, err, transit_active)
         if tripped and not last:
             trips += 1
         if tripped and last_t is not None:

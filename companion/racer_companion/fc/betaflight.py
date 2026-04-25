@@ -49,9 +49,31 @@ class BetaflightAdapter:
     # ── Construction helpers ────────────────────────────────────────────
 
     @classmethod
-    def open(cls, port: str, baud: int = 115200, **kwargs) -> "BetaflightAdapter":
-        """Open the underlying MSP transport and return an adapter wrapping it."""
-        return cls(msp.MspClient(port, baud), **kwargs)
+    def open(cls, port: str, baud: int = 115200, *,
+             record_path: Optional[str] = None, **kwargs) -> "BetaflightAdapter":
+        """Open the underlying MSP transport and return an adapter wrapping it.
+
+        `record_path` (optional): if set, every byte to/from the FC is teed
+        to the given file path via `RecordingAdapter`. Use to capture a
+        flight for offline replay/debug. The file is opened in append mode.
+        """
+        if record_path is None:
+            client = msp.MspClient(port, baud)
+        else:
+            # Build the underlying transport explicitly so we can wrap it
+            # in a RecordingAdapter before MspClient sees it.
+            if port.startswith("tcp://"):
+                from ..msp import _TcpSerialAdapter
+                host_port = port[len("tcp://"):]
+                host, p = host_port.rsplit(":", 1)
+                inner = _TcpSerialAdapter(host, int(p))
+            else:
+                import serial  # lazy
+                inner = serial.Serial(port, baud, timeout=0)
+            from ..recorder import RecordingAdapter
+            wrapped = RecordingAdapter(inner, record_path)
+            client = msp.MspClient.from_adapter(wrapped)
+        return cls(client, **kwargs)
 
     @classmethod
     def from_client(cls, client: msp.MspClient, **kwargs) -> "BetaflightAdapter":

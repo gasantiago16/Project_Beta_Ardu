@@ -146,12 +146,19 @@ class HeadingDivergenceTracker:
     eventually but only after lateral drift exceeds the radius — by then the
     drone has flown ~100m off-bearing.
 
-    Tracks |heading_err_deg| while actively pitching forward (state==TRANSIT).
-    If the time-windowed mean exceeds threshold for the full window, returns
-    True and the caller appends a `heading_diverged` safety reason.
+    Tracks |heading_err_deg| while in TRANSIT (the only state where the
+    bearing controller is active). If the time-windowed mean exceeds
+    threshold for the full window, returns True and the caller appends a
+    `heading_diverged` safety reason.
 
-    Window resets whenever forward flight stops, so a brief yaw-error spike
-    during HOLD or while turning at a waypoint does not trip it.
+    The `pitching_forward` parameter is misnamed for historical reasons —
+    semantically it's "is the bearing controller engaged?" main.py passes
+    `(state == TRANSIT)` for it. DO NOT additionally gate on small heading
+    error: that would make the watchdog only listen when there's nothing
+    wrong, defeating its purpose.
+
+    Window resets whenever the boolean drops False, so a brief yaw-error
+    spike during HOLD or after a waypoint capture does not trip it.
 
     Implementation note: uses `forward_started_at` rather than samples[0] for
     the "have we observed long enough?" gate. samples[0] timestamps suffer
@@ -197,7 +204,11 @@ class FlightModeReader:
     is_acro_active() returns:
       None  — box names not yet known (caller should treat as fail-open
               during the first few seconds; safelock.lua is primary defense)
-      True  — armed and neither ANGLE nor HORIZON active (assumed ACRO)
+      True  — neither ANGLE nor HORIZON active (assumed ACRO; we do NOT
+              consult the ARM bit, so a disarmed FC with no flight-mode
+              bits set still reads as ACRO. This is fail-active and matches
+              main.py's defense-in-depth use; safelock.lua + the runbook's
+              safety primitives gate the actual flight-mode discipline.)
       False — ANGLE or HORIZON active
     """
     box_names: list[str] | None = None

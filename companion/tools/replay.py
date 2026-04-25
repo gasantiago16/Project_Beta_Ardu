@@ -3,9 +3,12 @@
 Use after a flight or SITL run (recorded via `recorder.RecordingAdapter`)
 to inspect the decoded telemetry stream offline.
 
-Usage:
-    python -m racer_companion.tools.replay --log path/to/session.jsonl
-    python -m racer_companion.tools.replay --log s.jsonl --realtime  # natural pace
+Usage (run from the `companion/` directory):
+    python -m tools.replay --log path/to/session.jsonl
+    python -m tools.replay --log s.jsonl --realtime  # natural pace
+
+`tools/` is a sibling of `racer_companion/`, not a sub-package — matches the
+existing convention in `tools/msp_loopback_test.py` and `tools/replay_synth.py`.
 
 By default we drain everything as fast as possible. `--realtime` paces to
 the original recording timing — useful when stepping through a flight to

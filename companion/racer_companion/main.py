@@ -41,6 +41,9 @@ def main() -> int:
     p.add_argument("--config", required=True)
     p.add_argument("--dry-run", action="store_true",
                    help="Do not open serial, do not send MSP. Logs decisions only.")
+    p.add_argument("--record", default=None,
+                   help="Tee every MSP byte to/from the FC into a JSONL file at "
+                        "this path. Replay later with `python -m tools.replay`.")
     p.add_argument("--log-level", default="INFO")
     args = p.parse_args()
 
@@ -58,10 +61,14 @@ def main() -> int:
         fc = BetaflightAdapter.open(
             cfg.companion.serial_port, cfg.companion.baud,
             telemetry_period_s=1.0 / cfg.companion.telemetry_hz,
+            record_path=args.record,
         )
-        log.info("FC open on %s @ %d", cfg.companion.serial_port, cfg.companion.baud)
+        log.info("FC open on %s @ %d%s",
+                 cfg.companion.serial_port, cfg.companion.baud,
+                 f" (recording → {args.record})" if args.record else "")
     else:
-        log.warning("DRY RUN — no serial port opened")
+        log.warning("DRY RUN — no serial port opened; loop will run IDLE only "
+                    "(safety blocks while telemetry is absent).")
 
     mav_sender: mavlink_mod.MavlinkSender | None = None
     if cfg.companion.mavlink_publisher and not args.dry_run:
@@ -128,9 +135,14 @@ def main() -> int:
 
             # ── Sliding-window trackers (uses prior tick's state) ─────────
             prev_state = ctx.state
-            pitching_forward = (prev_state == state_mod.State.TRANSIT
-                                and abs(heading_err) < cfg.nav.yaw_align_threshold_deg)
-            heading_diverged = heading_tracker.update(t0, heading_err, pitching_forward)
+            # Feed every TRANSIT-state sample to the tracker, regardless of
+            # err magnitude. The tracker fires when sustained err exceeds
+            # threshold — gating on small err here would mean the watchdog
+            # only listens when there's nothing wrong, defeating its purpose.
+            # (If you re-add a gate here, make sure threshold_deg is below
+            # the gate threshold or the tracker becomes silent dead code.)
+            transit_active = (prev_state == state_mod.State.TRANSIT)
+            heading_diverged = heading_tracker.update(t0, heading_err, transit_active)
             acro_check = fc.is_acro_active() if fc is not None else None
             # Fail-open on None (BOXNAMES not yet primed) — safelock.lua is the
             # primary defense and the runbook gates field operation on it.

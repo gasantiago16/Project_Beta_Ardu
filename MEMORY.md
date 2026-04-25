@@ -23,13 +23,13 @@ project state.
 
 ---
 
-## Snapshot — v0.4 (Apr 25 2026, defense-in-depth)
+## Snapshot — v0.5 (Apr 25 2026, capability + quality pass)
 
 | Component | Status | Validated |
 |-----------|--------|-----------|
 | Plan + architecture (`README.md`) | ✅ shipped | — |
-| Companion Python library (`companion/`) | ✅ shipped | 105 unit tests on push CI |
-| Betaflight CLI configs (`bf_config/`) | ✅ shipped, **no real BF flashed yet** | — |
+| Companion Python library (`companion/`) | ✅ shipped | 159 unit tests + 9 hypothesis property tests on push CI |
+| Betaflight CLI configs (`bf_config/`) | ✅ shipped, **no real BF flashed yet** | preflight_validator + `example_manifest.txt` |
 | Per-phase build docs (`docs/`) | ✅ shipped | — |
 | EdgeTX Lua scripts (`edgetx_scripts/`) | ✅ shipped, **no radio provisioned yet** | Lupa parse + 11 logic tests on push CI |
 | Hardware BOM (`HARDWARE_BOM.md`) | ✅ shipped | — |
@@ -38,7 +38,22 @@ project state.
 | MAVLink publisher (`racer_companion/mavlink.py`) | ✅ shipped | HEARTBEAT + STATUSTEXT byte-for-byte + COMPANION_STATE round-trip vs pymavlink 2.4.49 |
 | QGroundControl on phone setup | ✅ documented, **not yet field-verified** | — |
 | Companion-side ACRO check (MSP_STATUS_EX) | ✅ shipped | unit tests; fail-open until BOXNAMES received (safelock.lua remains primary) |
-| Heading-divergence watchdog | ✅ shipped | unit tests (mag-NONE drift detection) |
+| Heading-divergence watchdog | ✅ shipped | unit + integration tests; gate is `state==TRANSIT` (NO err filter — see Sharp edges) |
+| FlightController abstraction (`fc/`) | ✅ shipped | Protocol + BetaflightAdapter (only impl); `is_acro_active`, `tick()→TelemetrySnapshot` |
+| Byte-level MSP recorder (`recorder.py`) | ✅ shipped + wired | `--record <path>` on main.py; 11 round-trip tests + integration test |
+| HOLD position controller (`nav.hold_command_us`) | ✅ shipped | body-frame P, NaN-guarded, heading=0/90/180/270 sign-tested |
+| Pre-flight config validator (`scripts/preflight_validator.py`) | ✅ shipped | 18 tests; case-insensitive enums only, name fields strict |
+| Heading-threshold tuning harness (`scripts/tune_heading_threshold.py`) | ✅ shipped, **needs first real flight log** | 12 tests; ASCII output; reports trip_edges + tripped_seconds |
+| Property-based tests (`test_safety_properties.py`) | ✅ shipped | hypothesis>=6.100; FRESH_RECEIVED_AT strategy + lat/lon poles + antimeridian |
+
+### v0.5 changes (capability + quality pass following 6-agent peer review + holistic review)
+- **FC abstraction (`fc/`)**: FlightController Protocol + BetaflightAdapter wrapping MspClient + FlightModeReader. main.py now consumes a typed TelemetrySnapshot per tick. Future ports (INAV / ArduPilot) implement the Protocol; nav/state/safety stay unchanged.
+- **Byte-level MSP recorder + replay**: `recorder.RecordingAdapter` tees every byte to a JSONL file; `tools.replay` (run as `python -m tools.replay`) re-feeds the bytes through the parser offline. Wire via `--record <path>` on main.py. Field incidents become reproducible.
+- **HOLD wind correction (`nav.hold_command_us`)**: body-frame P controller with small gains (8 us/m, ±60us cap) replaces centered-sticks behavior. Drone now lazily opposes wind drift inside the hold disc; state.py still kicks back to TRANSIT past `arrival_radius_m × 1.5`.
+- **Pre-flight validator (`scripts/preflight_validator.py`)**: diff a per-drone manifest against an FC `dump`, exit 1 on mismatch. `bf_config/per_drone/example_manifest.txt` defines the safety floor (`mask=15`, `mag_hardware=NONE`). Same idea as the SITL boot-time readback, but for real drones.
+- **Heading-threshold tuning harness (`scripts/tune_heading_threshold.py`)**: replay a flight log through the divergence tracker across a grid of (threshold, window); report both trip_edges and tripped_seconds. ASCII output (Windows-console safe). Uses `state == TRANSIT` gate to match what main.py feeds the live tracker.
+- **Property-based safety tests**: hypothesis-driven invariants on clamp, evaluate(), HeadingDivergenceTracker. `FRESH_RECEIVED_AT` strategy makes the `ok=True` branch reachable; lat/lon include poles and antimeridian.
+- **Heading-tracker engagement gate corrected** (holistic review finding): the `pitching_forward` boolean used to additionally gate on `|heading_err| < 25°`, which combined with the 60° threshold meant the watchdog could NEVER trip. Now `transit_active = (state == TRANSIT)` only — feeds every TRANSIT-state sample to the tracker.
 
 ### v0.4 changes (defense-in-depth pass following ultrareview)
 - **BUG-1**: `safety.evaluate` now blocks on `analog is None` (was silently OK; loose VBAT pad would pass). Same fix for stale_analog.
@@ -129,7 +144,7 @@ beyond a $25 GPS module.
 | MAVLink command ingest by BF | BF is MAVLink-tx-to-GCS only. Doesn't accept commands. |
 | ML / learned controller | A P-controller is debuggable in 50 lines. Failure modes obvious. |
 | Pre-commit hooks (ruff/black/lualint) | Adds friction before codebase has stabilized. Revisit after 5+ contributors. |
-| CI MAVLink publisher integration test | pymavlink as runtime dep is heavy. Tests use byte-for-byte ground truth instead — same effect, no dep. |
+| CI MAVLink publisher integration test | pymavlink as runtime dep is heavy. Added as DEV dep (`requirements-dev.txt`) on 2026-04-25 for cross-validation tests only — companion runtime stays pyserial-only. |
 | Pi 3B+/4 as companion | Too heavy and power-hungry. Pi Zero 2W = same compute, 1/3 the weight. |
 | Beitian / no-name GPS modules | Tied to most BF Rescue flyaway reports. Stick to Matek / HGLRC / known-vendor M10. |
 
@@ -193,6 +208,38 @@ in flight. **Read this list before any change to the load-bearing files.**
   the bit-index map is known, `acro_active` reads as `False`. `safelock.lua`
   (radio-side) is the primary defense; this is belt-and-suspenders. Don't
   rely on the companion-side check alone.
+- **`HeadingDivergenceTracker` MUST NOT be gated on small heading error.**
+  The tracker fires when the windowed mean of `|err|` exceeds threshold.
+  If `main.py` only feeds it samples where `|err|` is already small (e.g.,
+  the old `|err| < yaw_align_threshold_deg` gate), the tracker is silent
+  dead code — it never sees the divergence it's supposed to catch. The
+  caller-passed `pitching_forward` parameter is misnamed; it actually
+  means "is the bearing controller active" and should be `state == TRANSIT`
+  with no additional err filter. Holistic review found this on Apr 25 2026.
+- **`is_acro_active()` does not consult ARM.** Neither-ANGLE-nor-HORIZON
+  reads as ACRO even when the FC is disarmed. This is intentional fail-
+  active for the safety use, but a future maintainer expecting an arm
+  check (e.g., to suppress a warning while the FC is disarmed) won't get
+  one. `safelock.lua` and the runbook gate the actual flight-mode discipline.
+- **`tools/` is a sibling of `racer_companion/`, not a sub-package.**
+  `python -m tools.replay` from `companion/` works; `python -m
+  racer_companion.tools.replay` does NOT exist. Same convention as
+  `tools.msp_loopback_test` and `tools.replay_synth`.
+- **`TelemetrySnapshot` returned by `BetaflightAdapter.tick()` is a copy.**
+  Each call returns a fresh `dataclasses.replace(...)` instance so callers
+  may safely retain it across ticks for diff/replay. Don't change `tick()`
+  to return the internal mutable snapshot — it's load-bearing for any
+  diff-based consumer.
+- **`RecordingAdapter._emit` swallows OSError on write.** A disk-full or
+  pipe-closed during a flight must NOT take the FC link down. Once
+  `_fh_dead` flips, no further log lines are emitted that session — the
+  flight continues, the recording just stops mid-way. This is intentional;
+  rotating the log mid-flight is out of scope.
+- **`preflight_validator._normalize` is case-insensitive ONLY for uniformly-
+  cased single-token alphanumeric values.** `none`/`NONE`/`MAX_ALT` match
+  case-insensitively (BF emits enums uppercase but accepts either). Mixed-
+  case values like `Alex1` or `craft_name = SteelEagle` stay strict — a
+  wrong-case name in a name field would silently match otherwise.
 
 ### Test discipline
 - **74 tests, 71 always-run + 3 SITL env-gated.** When you add a new module,
@@ -364,4 +411,4 @@ periodically.
 - **Don't bloat.** If a topic grows past 30 lines, link to its own
   document instead. This file should stay scannable in under 10 minutes.
 
-Last touched: Apr 25 2026, v0.4 (defense-in-depth pass), branch `safety-defense-in-depth`.
+Last touched: Apr 25 2026, v0.5 (capability + quality pass + holistic-review fixes), branch `safety-defense-in-depth`.
