@@ -98,6 +98,83 @@ class TestStatustext(unittest.TestCase):
         payload = frame[10:10 + 51]
         self.assertEqual(payload[1:51], b"x" * 50)
 
+    def test_byte_for_byte_pymavlink_full_text(self):
+        # Captured from pymavlink 2.4.49:
+        #   m = MAVLink(buf, srcSystem=1, srcComponent=191); m.seq = 0
+        #   m.statustext_send(severity=0, text=b'x'*50)
+        # We picked a full-50-byte text to avoid pymavlink's optional v2 trailing-
+        # zero truncation (we do not implement it; both encodings are spec-valid).
+        expected = bytes.fromhex(
+            "fd3300000001bffd000000"
+            + "78" * 50
+            + "522b"
+        )
+        actual = mavlink.encode_statustext(seq=0, severity=0, text="x" * 50)
+        self.assertEqual(actual.hex(), expected.hex())
+
+
+class TestCompanionStateByteForByte(unittest.TestCase):
+    """Frozen reference vector for our custom message. CRC_EXTRA=42 is hand-
+    picked (see mavlink.py); this test guards against accidental changes to
+    field order, encoding, or CRC math."""
+
+    def test_frozen_reference(self):
+        # Captured from this codebase on 2026-04-25. Inputs chosen so float
+        # representations are exact in IEEE-754 (powers of 2 and clean integers).
+        expected = bytes.fromhex(
+            "fd0e00002a01bf"      # STX | LEN=14 | INCOMPAT=0 | COMPAT=0 | SEQ=42 | SYSID=1 | COMPID=191
+            "d43000"              # MSGID=12500 (LE)
+            "0000fb42"            # distance_m=125.5
+            "00008840"            # alt_m=4.25
+            "00003442"            # heading_deg=45.0
+            "02"                  # state=2
+            "0b"                  # safety_reasons_bitmap=0b1011
+            "a500"                # CRC
+        )
+        actual = mavlink.encode_companion_state(
+            seq=42,
+            distance_m=125.5, alt_m=4.25, heading_deg=45.0,
+            state=2, safety_reasons_bitmap=0b00001011,
+        )
+        self.assertEqual(actual.hex(), expected.hex())
+
+
+class TestPymavlinkRoundTrip(unittest.TestCase):
+    """Decode our hand-rolled frames with pymavlink. Validates that every
+    byte we put on the wire (header layout, CRC math, payload field order)
+    is interpretable by an off-the-shelf MAVLink v2 receiver."""
+
+    def setUp(self):
+        try:
+            from pymavlink.dialects.v20 import common
+        except ImportError:
+            self.skipTest("pymavlink not installed")
+        self.common = common
+        self.mav = common.MAVLink(None, srcSystem=1, srcComponent=191)
+        self.mav.robust_parsing = True
+
+    def test_heartbeat_decodes(self):
+        frame = mavlink.encode_heartbeat(seq=0)
+        msgs = self.mav.parse_buffer(frame)
+        self.assertIsNotNone(msgs)
+        self.assertEqual(len(msgs), 1)
+        self.assertEqual(msgs[0].get_type(), "HEARTBEAT")
+        self.assertEqual(msgs[0].type, mavlink.MAV_TYPE_ONBOARD_CONTROLLER)
+        self.assertEqual(msgs[0].autopilot, mavlink.MAV_AUTOPILOT_INVALID)
+        self.assertEqual(msgs[0].system_status, mavlink.MAV_STATE_ACTIVE)
+
+    def test_statustext_decodes(self):
+        frame = mavlink.encode_statustext(
+            seq=7, severity=mavlink.SEV_WARNING,
+            text="heading_diverged, low_vbat_13.5",
+        )
+        msgs = self.mav.parse_buffer(frame)
+        self.assertIsNotNone(msgs)
+        self.assertEqual(len(msgs), 1)
+        self.assertEqual(msgs[0].get_type(), "STATUSTEXT")
+        self.assertEqual(msgs[0].severity, mavlink.SEV_WARNING)
+        self.assertEqual(msgs[0].text, "heading_diverged, low_vbat_13.5")
+
 
 class TestCompanionState(unittest.TestCase):
     def test_payload_layout(self):

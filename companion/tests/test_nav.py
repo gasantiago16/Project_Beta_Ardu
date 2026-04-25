@@ -72,6 +72,32 @@ class TestComputeRc(unittest.TestCase):
         rc, _ = nav.compute_rc(wp, 37.001, -122.001, 500, 0.0, 0, nav.NavTuning())
         self.assertEqual(len(rc), 8)
 
+    def test_climb_phase_zeros_horizontal_sticks(self):
+        # BUG-4 fix: during climb, never command roll/pitch/yaw away from
+        # center even if the bearing/distance to waypoint suggest it.
+        wp = nav.Waypoint(37.001, -121.999, 5.0)  # ~140m away
+        rc, dbg = nav.compute_rc(
+            wp, 37.0, -122.0, 0, 90.0, 0, nav.NavTuning(),
+            climb_phase=True,
+        )
+        self.assertEqual(rc[nav.CH_ROLL], 1500)
+        self.assertEqual(rc[nav.CH_PITCH], 1500)
+        self.assertEqual(rc[nav.CH_YAW], 1500)
+        self.assertTrue(dbg["climb_phase"])
+        # Throttle should still climb to target altitude (alt=0 cm, target=5m)
+        self.assertGreater(rc[nav.CH_THROTTLE], 1300)
+
+    def test_climb_phase_off_resumes_horizontal(self):
+        # Without climb_phase, far waypoint produces non-centered pitch/yaw.
+        wp = nav.Waypoint(37.001, -121.999, 5.0)
+        rc, dbg = nav.compute_rc(
+            wp, 37.0, -122.0, 500, 0.0, 0, nav.NavTuning(),
+            climb_phase=False,
+        )
+        self.assertFalse(dbg["climb_phase"])
+        # Heading is north (0°); waypoint is NE (~45°). Yaw should command right.
+        self.assertGreater(rc[nav.CH_YAW], 1500)
+
 
 if __name__ == "__main__":
     unittest.main()

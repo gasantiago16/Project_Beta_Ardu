@@ -88,12 +88,26 @@ def compute_rc(
     current_heading_deg: float,
     vario_cms: int,
     t: NavTuning,
+    *,
+    climb_phase: bool = False,
 ) -> tuple[list[int], dict]:
+    """Compute RC channels for the current tick.
+
+    `climb_phase=True` zeros horizontal stick output (roll/pitch/yaw centered)
+    while still computing throttle to climb-target altitude. Defense-in-depth
+    against low-altitude lateral travel during the CLIMB state, which would
+    happen on a downhill takeoff site if the bearing controller engaged at
+    ground level.
+    """
     distance = haversine_m(current_lat, current_lon, waypoint.lat_deg, waypoint.lon_deg)
     target_bearing = bearing_deg(current_lat, current_lon, waypoint.lat_deg, waypoint.lon_deg)
     h_err = heading_error_deg(target_bearing, current_heading_deg)
 
-    if distance < t.arrival_radius_m:
+    if climb_phase:
+        roll = CHANNEL_MID
+        pitch = CHANNEL_MID
+        yaw = CHANNEL_MID
+    elif distance < t.arrival_radius_m:
         roll = CHANNEL_MID
         pitch = CHANNEL_MID
         yaw = CHANNEL_MID
@@ -114,4 +128,5 @@ def compute_rc(
         "target_bearing_deg": target_bearing,
         "heading_err_deg": h_err,
         "arrived": distance < t.arrival_radius_m,
+        "climb_phase": climb_phase,
     }

@@ -23,23 +23,35 @@ project state.
 
 ---
 
-## Snapshot — v0.3 (Apr 25 2026)
+## Snapshot — v0.4 (Apr 25 2026, defense-in-depth)
 
 | Component | Status | Validated |
 |-----------|--------|-----------|
 | Plan + architecture (`README.md`) | ✅ shipped | — |
-| Companion Python library (`companion/`) | ✅ shipped | 71 unit tests on push CI |
+| Companion Python library (`companion/`) | ✅ shipped | 105 unit tests on push CI |
 | Betaflight CLI configs (`bf_config/`) | ✅ shipped, **no real BF flashed yet** | — |
 | Per-phase build docs (`docs/`) | ✅ shipped | — |
-| EdgeTX Lua scripts (`edgetx_scripts/`) | ✅ shipped, **no radio provisioned yet** | Lupa parse check on push CI |
+| EdgeTX Lua scripts (`edgetx_scripts/`) | ✅ shipped, **no radio provisioned yet** | Lupa parse + 11 logic tests on push CI |
 | Hardware BOM (`HARDWARE_BOM.md`) | ✅ shipped | — |
 | Drill / incident / sign-off log templates | ✅ shipped, **empty** | — |
-| BF SITL test rig (`sitl/`) | ✅ shipped, **container not yet built** | manual-trigger CI workflow |
-| MAVLink publisher (`racer_companion/mavlink.py`) | ✅ shipped | byte-for-byte vs pymavlink 2.4.49 |
+| BF SITL test rig (`sitl/`) | ✅ shipped, **container not yet built** | manual-trigger CI; readback asserts mask=15 + mag=NONE on boot |
+| MAVLink publisher (`racer_companion/mavlink.py`) | ✅ shipped | HEARTBEAT + STATUSTEXT byte-for-byte + COMPANION_STATE round-trip vs pymavlink 2.4.49 |
 | QGroundControl on phone setup | ✅ documented, **not yet field-verified** | — |
+| Companion-side ACRO check (MSP_STATUS_EX) | ✅ shipped | unit tests; fail-open until BOXNAMES received (safelock.lua remains primary) |
+| Heading-divergence watchdog | ✅ shipped | unit tests (mag-NONE drift detection) |
 
-**8 commits on `main`** (`55d7342` → `391e575`). Two CI workflows: `tests.yml`
-on every push (currently 13–24s, all green), `sitl.yml` manual-trigger.
+### v0.4 changes (defense-in-depth pass following ultrareview)
+- **BUG-1**: `safety.evaluate` now blocks on `analog is None` (was silently OK; loose VBAT pad would pass). Same fix for stale_analog.
+- **BUG-2**: state machine — HOLD now re-engages TRANSIT when drift > `arrival_radius_m × 1.5`. Wind in HOLD used to hold centered sticks while drifting.
+- **BUG-3**: `safety.max_distance_from_target_during_transit_m` was a dead config field; now wired as `transit_runaway_*m` reason while in TRANSIT.
+- **BUG-4**: `nav.compute_rc(climb_phase=True)` zeros roll/pitch/yaw during CLIMB until current alt ≥ 80% of target — kills the downhill-takeoff treeline hazard.
+- **stale_rc**: companion now reports when MSP_RC stops arriving (was invisible).
+- **heading_diverged**: sliding-window watchdog catches mag-NONE yaw drift before geofence does.
+- **acro_active**: companion subscribes MSP_STATUS_EX + MSP_BOXNAMES, decodes ANGLE/HORIZON box bits, refuses overrides if BF is in ACRO. Defense-in-depth alongside `safelock.lua`.
+- **Lua logic harness**: `scripts/test_lua_logic.py` drives `racestrt.lua`'s state machine and `safelock.lua`'s threshold logic via lupa with controlled time. Catches transition bugs that parse-only check missed.
+- **SITL readback**: `sitl/start.sh` now hard-fails if `msp_override_channels_mask = 15` or `mag_hardware = NONE` is missing from the dump after defaults applied. Was best-effort with a misleading "WARNING" before.
+
+**Tests now: 105 Python (102 always-run + 3 SITL env-gated) + 11 Lua logic.**
 
 **No drones built yet.** All progress is software + documentation. Field
 work begins with the first pilot doing Phase 0.
@@ -152,7 +164,8 @@ in flight. **Read this list before any change to the load-bearing files.**
   in `docs/01_phase0_gps_rescue.md`.
 - **`msp_override_channels_mask = 15`** must be set, otherwise the companion
   silently has no effect (BF sends RX values regardless of MSP). Check
-  `bf_config/per_drone/<drone>.txt` if behavior is wrong.
+  `bf_config/per_drone/<drone>.txt` if behavior is wrong. SITL boot now
+  reads back the dump and fails loudly if this isn't set.
 - **Companion "active" gate is `state.is_active(state)`** — any state other
   than `CLIMB`/`TRANSIT`/`HOLD` returns `False` and the loop sends NO
   `MSP_SET_RAW_RC`. This is intentional — silence triggers BF's MSP
@@ -162,6 +175,24 @@ in flight. **Read this list before any change to the load-bearing files.**
   so the first call to `tick()` always emits both. Setting them to 0
   re-introduces the cold-start bug where no telemetry is sent until enough
   time has elapsed.
+- **Telemetry-absent must trip safety, not just telemetry-stale.** Mirror
+  the GPS pattern: `if foo is None: reasons.append("no_foo_telemetry")`,
+  THEN check staleness, THEN check value bounds. The original code only
+  checked stale_* and value bounds for analog → a loose VBAT pad silently
+  passed. Same logic for any new telemetry stream.
+- **Lua state-machine output is one-tick-delayed after a transition.**
+  `racestrt.lua` sets outputs from the OLD state, then transitions; the
+  NEW state's outputs appear on the next tick. ABORT is the exception
+  (checked at the top of run() so it takes effect same-tick). The Lua
+  logic harness encodes this; preserve it if you refactor.
+- **`HeadingDivergenceTracker` resets when not pitching forward.** If you
+  add code that pitches forward outside TRANSIT (e.g., a new "approach"
+  state), update the `pitching_forward` predicate in `main.py` or the
+  watchdog goes silent.
+- **`FlightModeReader` is fail-open until `MSP_BOXNAMES` arrives.** Until
+  the bit-index map is known, `acro_active` reads as `False`. `safelock.lua`
+  (radio-side) is the primary defense; this is belt-and-suspenders. Don't
+  rely on the companion-side check alone.
 
 ### Test discipline
 - **74 tests, 71 always-run + 3 SITL env-gated.** When you add a new module,
@@ -333,4 +364,4 @@ periodically.
 - **Don't bloat.** If a topic grows past 30 lines, link to its own
   document instead. This file should stay scannable in under 10 minutes.
 
-Last touched: Apr 25 2026, v0.3, commit `391e575`.
+Last touched: Apr 25 2026, v0.4 (defense-in-depth pass), branch `safety-defense-in-depth`.

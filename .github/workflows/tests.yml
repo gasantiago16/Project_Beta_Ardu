@@ -34,3 +34,5 @@ jobs:
         run: pip install lupa
       - name: Check Lua scripts parse
         run: python scripts/check_lua_syntax.py
+      - name: Run Lua state-machine logic tests
+        run: python scripts/test_lua_logic.py

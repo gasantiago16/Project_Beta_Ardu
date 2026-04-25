@@ -69,6 +69,28 @@ class TestDecode(unittest.TestCase):
         rc = msp.decode_rc(payload)
         self.assertEqual(rc, [1500, 1501, 1502, 1503, 1504, 1505, 1506, 1507])
 
+    def test_status_ex(self):
+        # cycleTime u16 | i2c u16 | sensor u16 | flightModeFlags u32 | profile u8
+        payload = struct.pack("<HHHIB", 100, 0, 0x21, 0b1010, 0)
+        s = msp.decode_status_ex(payload)
+        self.assertEqual(s.flight_mode_flags, 0b1010)
+
+    def test_status_ex_short(self):
+        with self.assertRaises(ValueError):
+            msp.decode_status_ex(b"\x00" * 5)
+
+    def test_box_names_simple(self):
+        payload = b"ARM;ANGLE;HORIZON;BEEPER;\x00\x00\x00"
+        names = msp.decode_box_names(payload)
+        self.assertEqual(names, ["ARM", "ANGLE", "HORIZON", "BEEPER"])
+
+    def test_box_names_no_trailing_semi(self):
+        names = msp.decode_box_names(b"ARM;ANGLE")
+        self.assertEqual(names, ["ARM", "ANGLE"])
+
+    def test_box_names_empty(self):
+        self.assertEqual(msp.decode_box_names(b"\x00\x00"), [])
+
 
 class TestParser(unittest.TestCase):
     def _build_response(self, cmd: int, payload: bytes) -> bytes:
