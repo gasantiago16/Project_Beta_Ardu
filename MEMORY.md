@@ -23,6 +23,101 @@ project state.
 
 ---
 
+## Snapshot — v0.6.1 (Apr 26 2026, in-Sim flight debug)
+
+| Component | State |
+|---|---|
+| BF SITL container build + boot | ✅ Phase-1 save + Phase-2 respawn clean, eeprom persisted, `.config_applied` marker prevents re-apply |
+| Bridge wire (host ↔ BF UDP via in-container relay) | ✅ Locked at ~67 Hz, 0 timeouts, rx ≈ tx in steady state. Background recv thread (`_rx_loop`) decouples motor RX from physics tick rate. Ephemeral motor port picked at orchestrator startup to dodge Windows Firewall heuristic. |
+| Final_World scene + Iris spawn in Isaac Sim | ✅ Renders cleanly via `final_world_betaflight.py` |
+| BF arming (motors actually spin) | ❌ `motor=0,0,0,0` even with `aux 0 0 0 1700 2100` + `msp_override_channels_mask=255` + AUX1=2000 from `hover_test`. Arming-disable flags say `RXLOSS` is stuck. |
+| `mission_demo` flight | ❌ Blocked by arming + virtual-GPS plumbing not in place (BF SITL ignores `position_xyz` field of fdm_packet). |
+
+### v0.6.1 changes — what landed in this session
+
+- **`integrations/pegasus_betaflight_backend.py`** — background recv
+  thread (`_rx_loop`), `SO_RCVBUF=1MiB`, `motor_port` default flipped
+  to 19500 then 38500 then ephemeral (Windows Defender Firewall blocks
+  long-lived UDP ports after enough rebinds). `recv_timeout_s` is now
+  cold-start-only.
+- **`integrations/orchestrators/final_world_betaflight.py`** — picks an
+  ephemeral host motor port at startup, restarts the in-container relay
+  to forward there. UTF-8 stdout reconfig before any print (Windows
+  cp1252 console). `import carb` deferred until after
+  `SimulationApp(...)` boots Kit/Carb. `[bridge]` stats line now
+  includes the cached motor `w` in rad/s so 0,0,0,0 vs flight-rate
+  values are obvious at a glance.
+- **`sitl/start.sh`** — proper two-phase boot: Phase 1 applies
+  defaults.txt + `save` (BF writes eeprom and exits with
+  systemReset()), Phase 2 respawns BF with the saved eeprom. Without
+  `save`, BF stays in CLI mode and the CLI arming-disable flag never
+  clears. `.config_applied` marker prevents re-applying on container
+  restart (BF creates a default eeprom on first boot, so eeprom
+  existence alone isn't a useful signal).
+- **`sitl/motor_relay.py`** (new) — single-process Python UDP relay
+  127.0.0.1:9002 (BF's hardcoded output) → host:`SITL_HOST_MOTOR_PORT`.
+  Replaces the previous `socat ... fork` which added 50-200 ms of
+  per-packet latency and capped Pegasus's physics loop at ~2 Hz.
+- **`sitl/defaults.txt`** — added `motor_pwm_protocol=PWM`
+  (clears MOTOR_PROTO arming flag), `small_angle=180`,
+  `min_check=1000`, `max_check=2000`,
+  `runaway_takeoff_prevention=OFF`, `aux 0 0 0 1700 2100 0 0` (binds
+  ARM mode to AUX1 high band). Bumped `msp_override_channels_mask` from
+  15 to 255 (was only covering channels 1-4; AUX1 needed for the ARM
+  box was being silently dropped at mask=15).
+- **`integrations/tools/hover_test.py`** (new) — minimal MSP arm +
+  throttle ramp tool that bypasses `mission_demo`'s GPS gate. Sends
+  centered RC + AUX1 high + throttle ramp 1000→hover.
+- **`integrations/tools/check_arming.py`** (new) — polls BF status
+  flags via MSP CLI, used to debug RXLOSS in parallel with hover_test.
+
+### v0.6.1 sharp edges
+
+- **`save` reboots BF AND so does `exit`.** Both write/discard config
+  and call `systemReset()`. The only way to leave CLI mode without
+  rebooting is to NOT enter it in the first place. Once `#` is sent,
+  the CLI arming-disable flag stays set until BF reboots. `start.sh`
+  intentionally uses `save` (not `exit`) because save persists; Phase 2
+  respawn loads the eeprom and BF starts NOT in CLI mode.
+- **`host.docker.internal` resolves to IPv6 first** on Docker Desktop.
+  BF's `inet_addr()` is IPv4-only and fails to INADDR_NONE, so motor
+  packets sendto 255.255.255.255 and vanish. `start.sh` pre-resolves
+  via `getent ahostsv4` before passing argv[1] to BF.
+- **Windows Defender Firewall blocks inbound UDP on a heuristic port
+  range.** 9002, 9012, 19500, 38500 all eventually got blocked after
+  enough rebinds during a debug session. Workaround: orchestrator
+  picks a fresh ephemeral port each launch and reconfigures the
+  in-container relay to forward there.
+- **BF SITL ignores `position_xyz` and `velocity_xyz` in fdm_packet**
+  (verified against `betaflight/4.5.1/src/main/target/SITL/sitl.c` —
+  `pkt->position_xyz` and `pkt->velocity_xyz` are referenced nowhere
+  in updateState). BF only consumes timestamp, IMU, quat, pressure.
+  No virtual GPS without a separate plumbing pass — that's task #39.
+- **`msp_override_channels_mask=15` only overrides channels 1-4 and
+  silently drops AUX1+.** Mission_demo + hover_test send AUX1=2000 to
+  ARM, but mask=15 dropped that channel and BF never saw the ARM
+  signal. Mask must be 255 for full 8-channel override.
+- **CRLF in scripts copied into Linux container breaks shebangs.**
+  Python scripts that touch `sitl/start.sh` or `sitl/motor_relay.py`
+  via text-mode IO inject CRLF on Windows; the container's
+  `#!/usr/bin/env bash\r` then fails with "bash\r: No such file".
+  Always `f.read()` + `replace(b'\\r\\n', b'\\n')` + binary `f.write()`
+  when editing those files programmatically.
+
+### Continuing the work — open debug
+
+Iris falls and sits on the asphalt because BF's motor outputs are
+zero-pinned. Bridge wire is fully proven. Three concrete things to
+try next session — see tasks #36-#40 + `docs/13_mission_demo.md`
+"Open debug" section:
+
+1. Open BF Configurator on `localhost:5761` while `hover_test` runs
+   — Modes tab shows whether ARM flips green when AUX1 goes 1500→2000.
+2. Lower `rx_min_usec = 750` (currently 885) + try
+   `feature -RX_PARALLEL_PWM -RX_PPM` in defaults.txt.
+3. Wire virtual GPS so mission_demo can navigate
+   (BF SITL ignores position_xyz; mission needs MSP_RAW_GPS data).
+
 ## Snapshot — v0.6 (Apr 25 2026, HITL sim integration)
 
 | Component | Status | Validated |

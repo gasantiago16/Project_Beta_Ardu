@@ -28,6 +28,21 @@ The X-pattern visits 4 of the 5 corners (SW start, NE, SE, NW) — that's
 two crossing diagonals, hence "X". After circles, the drone parks in
 the geographically *opposite* corner (NE) for the autoland test.
 
+## Status (Apr 26 2026)
+
+| Layer | State |
+|---|---|
+| BF SITL container build + boot | ✅ Phase-1 save + Phase-2 respawn clean, eeprom persisted |
+| Bridge wire (host ↔ BF UDP via in-container relay) | ✅ Locked at 67 Hz, 0 timeouts, rx ≈ tx |
+| Final_World scene + Iris spawn in Isaac Sim | ✅ Renders cleanly via the orchestrator |
+| BF arming (motors spin) | ❌ `motor=0,0,0,0` even with `aux 0 0 0 1700 2100` + `msp_override_channels_mask=255` + AUX1=2000. RXLOSS arming-disable flag not clearing. |
+| `mission_demo` flight | ❌ Blocked by arming, plus virtual-GPS plumbing not in place (BF SITL ignores `position_xyz` field). |
+
+**Iris falls to the asphalt and sits there** because BF's motor outputs
+are zero-pinned. The wire path is fully proven (push `hover_test` and
+watch `[bridge] motor w=...` — it stays at all-zeros). Next-session
+debug list lives in tasks #36-#40 and at the bottom of this doc.
+
 ## Prerequisites
 
 - Phases 1-6 of `pegasus-bridge` shipped (this branch).
@@ -195,3 +210,31 @@ fix is in the runbook above, not in code.**
 - **No abort.** Ctrl-C kills the mission immediately. The drone just stops
   receiving MSP, BF takes over via failsafe — usually safe, but document
   before pilots watch a demo.
+
+## Open debug — get BF actually arming
+
+The wire is alive but BF emits `motor=0,0,0,0` so Iris never lifts.
+RXLOSS arming-disable flag is the suspect. Three things to try, in
+order, next session — full task list at #36-#40:
+
+1. **Open BF Configurator (Chrome app) on `localhost:5761`** while
+   `hover_test` runs. Modes tab → does ARM flip green when AUX1 goes
+   1500→2000? Receiver tab → do channel values match what hover_test
+   sends? This will pinpoint whether the override is reaching the RC
+   subsystem at all.
+
+2. **Edit `sitl/defaults.txt`**: `set rx_min_usec = 750` (currently 885;
+   AUX1=1000 idle may be getting clamped as below-min). Add
+   `feature -RX_PARALLEL_PWM -RX_PPM` so BF doesn't expect parallel-PWM
+   hardware. Rebuild with `docker compose -f sitl/docker-compose.yml
+   up -d --build` so the Phase-1 save re-applies.
+
+3. **Wire virtual GPS** so `mission_demo` can actually navigate. BF
+   SITL ignores `position_xyz` in the FDM packet (verified against
+   `sitl.c` 4.5.1) — mission_demo's GPS gate (≥8 sats) blocks forever.
+   Either patch mission_demo to bypass GPS + drive from Pegasus state
+   directly, or write an MSP shim that injects synthetic MSP_RAW_GPS
+   responses derived from the orchestrator's known position.
+
+Once #1 + #2 land, motors should fire and Iris will lift off. #3 is
+the gate to the full X-pattern + circles + LOS demo.
