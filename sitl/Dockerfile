@@ -17,16 +17,30 @@ ARG BETAFLIGHT_REF=4.5.1
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         git make gcc g++ libc6-dev ruby ca-certificates \
+        gcc-arm-none-eabi \
     && rm -rf /var/lib/apt/lists/*
+# BF's mk/tools.mk performs an `arm-none-eabi-gcc --version` pre-check even
+# on the SITL target (which actually compiles with host gcc). Without
+# gcc-arm-none-eabi, the makefile aborts before deciding the SITL target
+# doesn't need ARM. The package is ~200 MB of toolchain we never use; the
+# alternative `make arm_sdk_install` downloads ~50 MB of binaries from BF's
+# CDN — slower + adds a network dep at build time.
 
 WORKDIR /opt
 RUN git clone --depth 1 --branch ${BETAFLIGHT_REF} https://github.com/betaflight/betaflight.git
 
 WORKDIR /opt/betaflight
-# SITL build. May produce warnings; build itself succeeds on 4.5.x.
+# SITL build. We override GCC_REQUIRED_VERSION so the makefile's pre-check
+# accepts whatever arm-none-eabi-gcc Debian shipped (the SITL target uses
+# host gcc, not ARM gcc, so the actual version doesn't matter — just the
+# pre-check). Capture the installed version dynamically; if the env var is
+# unset BF rejects 12.2.1 because it expects 10.3.1.
 # If your BF version renamed the target, edit the line below
 # (historical names: SITL, sitl, SITL_X86_64).
-RUN make TARGET=SITL || (echo "SITL build failed — see Dockerfile comments" && exit 1)
+RUN GCC_VER=$(arm-none-eabi-gcc -dumpversion) && \
+    echo "Using arm-none-eabi-gcc ${GCC_VER} (host gcc does the actual SITL compile)" && \
+    make TARGET=SITL GCC_REQUIRED_VERSION="${GCC_VER}" || \
+    (echo "SITL build failed — see Dockerfile comments" && exit 1)
 
 FROM debian:bookworm-slim AS runtime
 

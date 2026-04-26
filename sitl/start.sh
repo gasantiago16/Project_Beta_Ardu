@@ -38,29 +38,54 @@ for i in $(seq 1 30); do
   sleep 1
 done
 
-# Apply defaults.txt over CLI TCP. BF SITL accepts CLI commands on the same
-# port that serves MSP; an `#` byte enters CLI mode in some BF versions, but
-# the standard path is via Configurator. For automated boot we just send
-# the lines verbatim — works on 4.5.x.
+# Apply defaults.txt over CLI TCP. Two BF SITL gotchas we hit the hard way:
+#   1. CLI mode is entered when BF receives `#` as the first byte of a
+#      line. Our defaults.txt starts with `# Betaflight SITL...` — BF
+#      reads the `#`, enters CLI, then tries to execute the rest of that
+#      line as a command, which fails. Fix: prepend `\n#\n` for a clean
+#      CLI entry before defaults.txt content.
+#   2. Sending all lines in one TCP write (the original `nc -q 2 < file`
+#      approach) blasts BF with the entire buffer at once. BF accepts
+#      the first line or two and silently drops the rest — only the
+#      banner-and-prompt comes back, no per-command echoes. Fix: drip
+#      the file one line at a time with a short sleep so BF's CLI parser
+#      can keep up.
+#
+# A tighter implementation would use Python or a CLI tool that waits for
+# each prompt; this shell version is a reasonable compromise that uses
+# only the netcat already in the container.
 if [ -f defaults.txt ]; then
   echo "[sitl] Applying defaults.txt..."
-  if ! nc -q 2 localhost 5761 < defaults.txt; then
+  if ! {
+        printf '\n#\n'
+        sleep 0.5
+        while IFS= read -r line || [ -n "$line" ]; do
+          printf '%s\n' "$line"
+          sleep 0.05
+        done < defaults.txt
+        printf 'save\n'
+        sleep 1.5
+      } | nc -q 3 localhost 5761; then
     echo "[sitl] FATAL: defaults application failed (nc exit non-zero)"
     exit 1
   fi
 fi
 
 # Read back the running config and verify the safety-critical lines.
+# Same `\n#\n` discipline so the verify connection enters CLI cleanly.
 # If the config didn't apply (silent FC, wrong baud, partial parse), MSP
 # overrides could engage on AUX channels — pilot can't take the sticks back.
 # Hard-fail rather than continue with a misleading "ready" log.
 echo "[sitl] Verifying applied defaults..."
-DUMP=$(printf 'dump\nexit\n' | nc -q 3 localhost 5761 || true)
+DUMP=$(printf '\n#\ndump\nexit\n' | nc -q 3 localhost 5761 || true)
 
 assert_setting() {
   local key="$1"
   local expected="$2"
-  if ! echo "$DUMP" | grep -qE "^[[:space:]]*${key}[[:space:]]*=[[:space:]]*${expected}[[:space:]]*$"; then
+  # BF's `dump` command emits each line as `set <key> = <value>` (with the
+  # `set ` prefix). The previous regex assumed `<key> = <value>` — bare,
+  # no prefix — and matched nothing on a real BF SITL dump. Accept either.
+  if ! echo "$DUMP" | grep -qE "^[[:space:]]*(set[[:space:]]+)?${key}[[:space:]]*=[[:space:]]*${expected}[[:space:]]*$"; then
     echo "[sitl] FATAL: expected '${key} = ${expected}' not present in dump"
     echo "[sitl] grep result for ${key}:"
     echo "$DUMP" | grep -E "${key}" || echo "  (no match — setting absent)"
