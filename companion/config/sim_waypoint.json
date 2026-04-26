@@ -1,0 +1,51 @@
+{
+  "_doc": "Phase 3 sim config — points the racer_companion at BF SITL via TCP. WAYPOINT IS A (0,0) PLACEHOLDER: run `python -m integrations.tools.discover_bf_gps` to read what GPS coords BF SITL is actually reporting at the chemical-plant spawn, then update waypoint.lat_deg / .lon_deg below. See docs/09_sim_phase3_smoke.md. NOTE safety.min_vbat=0 is SIM-ONLY (BF SITL replies to MSP_ANALOG with vbat=0.0, so 14.4 would block forever); set back to 14.4 (or per-pack) for any real-hardware config.",
+
+  "companion": {
+    "serial_port": "tcp://127.0.0.1:5761",
+    "baud": 115200,
+    "loop_hz": 50,
+    "telemetry_hz": 10,
+
+    "aux_channel_index": 6,
+    "aux_active_us_min": 1700,
+
+    "climb_target_alt_m": 5.0,
+    "arrival_dwell_s": 2.0,
+
+    "log_path": "",
+    "mavlink_publisher": "",
+    "mavlink_heartbeat_hz": 1.0,
+    "mavlink_state_hz": 5.0
+  },
+
+  "nav": {
+    "yaw_kp": 4.0,
+    "yaw_max_us": 200.0,
+    "pitch_kp_per_m": 4.0,
+    "pitch_max_us": 150.0,
+    "yaw_align_threshold_deg": 25.0,
+
+    "throttle_hover": 1300,
+    "throttle_kp_per_m": 6.0,
+    "throttle_kd_per_cms": 0.4,
+    "throttle_max_offset": 200,
+    "arrival_radius_m": 3.0,
+
+    "hold_kp_per_m": 8.0,
+    "hold_max_offset_us": 60.0
+  },
+
+  "safety": {
+    "geofence_radius_m": 50.0,
+    "min_satellites": 8,
+    "min_vbat": 0.0,
+    "max_distance_from_target_during_transit_m": 80.0
+  },
+
+  "waypoint": {
+    "lat_deg": 0.0,
+    "lon_deg": 0.0,
+    "alt_m": 5.0
+  }
+}
