@@ -430,11 +430,14 @@ def main() -> int:
                     delta_tx = s["tx"] - last_stats["tx"]
                     delta_rx = s["rx"] - last_stats["rx"]
                     pct = s["timeouts"] / max(1, s["tx"]) * 100.0
+                    motors = bf_backend.input_reference()
                     print(
                         f"[bridge] tx={s['tx']} rx={s['rx']} "
                         f"timeouts={s['timeouts']} ({pct:.2f}%) "
                         f"| Δ tx={delta_tx} rx={delta_rx} in {dt_s:.1f}s "
-                        f"({delta_tx / dt_s:.0f} Hz)",
+                        f"({delta_tx / dt_s:.0f} Hz) "
+                        f"| motor w={motors[0]:.0f},{motors[1]:.0f},"
+                        f"{motors[2]:.0f},{motors[3]:.0f} rad/s",
                         flush=True,
                     )
                     last_stats_t = now
