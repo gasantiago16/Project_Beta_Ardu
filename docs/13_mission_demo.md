@@ -38,12 +38,24 @@ the geographically *opposite* corner (NE) for the autoland test.
 
 ## Run — four-terminal workflow
 
+> **Windows pre-flight**: kill any stale Python listener on UDP 19500
+> before T2 (PowerShell: `Get-Process python | Stop-Process -Force`).
+> Stale listeners with `SO_REUSEADDR` can split-receive motor packets
+> and cause the bridge to think it's getting nothing.
+
 ```bash
 # T1: BF SITL container.
 cd ~/Project_Beta_Ardu
 docker compose -f sitl/docker-compose.yml up
+# Wait for "[sitl] Ready. SITL pid=N" + "Phase echoes confirmed".
+
+# (optional) Confirm the wire path before launching Isaac Sim:
+#   python -m integrations.tools.fake_pegasus_loop --duration 3
+#   Expect tx=150 rx≈75 in ~38 s — 50% drop is BF main-loop / FDM
+#   rate mismatch on a disarmed FC, not a wire bug.
 
 # T2: Pegasus + Iris in Final_World, spawning at SW corner.
+#     Bridge auto-binds host UDP 19500 (relay target) for motor RX.
 cd ~/PegasusSimulator
 python ~/Project_Beta_Ardu/integrations/orchestrators/final_world_betaflight.py \
     --corner SW

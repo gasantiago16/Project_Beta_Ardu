@@ -28,8 +28,9 @@ What this script does:
 3. Spawns an Iris quadrotor at the proven road-junction spawn (40.7, 17.1,
    1.3) — 1 m above the SM_RoadJunction_Plus28 asphalt center.
 4. Attaches a BetaflightUdpBackend (from Project_Beta_Ardu/integrations/)
-   that exchanges fdm_packet (UDP 9003) and servo_packet (UDP 9002) with
-   the BF SITL container.
+   that exchanges fdm_packet (UDP 9003 → BF) and servo_packet (UDP 19500
+   ← in-container socat relay forwarding BF's hardcoded 127.0.0.1:9002
+   output — see sitl/start.sh for the why) with the BF SITL container.
 5. Periodic stats logging every 5 s so it's visually obvious the lockstep
    is working (or stalling).
 
@@ -281,9 +282,10 @@ def main() -> int:
     light.CreateIntensityAttr(2000.0)
     UsdGeom.Xformable(light.GetPrim()).AddRotateXYZOp().Set(Gf.Vec3f(-45, 30, 0))
 
-    # Build the BF bridge. Defaults match BF source: PORT_STATE=9003 (FDM in,
-    # we send), PORT_PWM=9002 (motor out, we receive). rotor_max_omega is
-    # per-airframe (Iris ≈ 1023, race-quad ≈ 3000).
+    # Build the BF bridge. fdm_port=9003 (BF PORT_STATE), motor_port=19500
+    # (in-container socat relay target — BF's hardcoded 9002 stays on
+    # container loopback because Windows Defender Firewall blocks 9002).
+    # rotor_max_omega is per-airframe (Iris ≈ 1023, race-quad ≈ 3000).
     bf_cfg = BetaflightBackendConfig(
         bf_host=args.bf_host,
         rotor_max_omega=profile.rotor_max_omega,
