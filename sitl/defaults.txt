@@ -19,4 +19,10 @@ set mag_hardware = NONE
 # Phase 1 — MSP override
 set msp_override_channels_mask = 15
 
+# Sim-only: ANGLE mode mapped to AUX1 over its full range so any centered-
+# RC source (radio_to_bf, default mission RC, or BF's own failsafe baseline)
+# keeps the FC in ANGLE the entire mission. Real-flight builds bind ANGLE
+# to a 3-pos switch; this default is safe for sim only.
+aux 0 0 0 900 2100
+
 save

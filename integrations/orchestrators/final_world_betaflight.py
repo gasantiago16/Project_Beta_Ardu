@@ -74,8 +74,22 @@ parser.add_argument(
     help="Path to Final_World USD",
 )
 parser.add_argument(
-    "--spawn", type=float, nargs=3, default=[40.7, 17.1, 1.3],
-    help="Quad spawn X Y Z (meters, ENU). Default = SM_RoadJunction_Plus28 + 1 m alt.",
+    "--spawn", type=float, nargs=3, default=None,
+    help="Quad spawn X Y Z (meters, ENU). Default depends on --corner; "
+         "explicit --spawn overrides --corner.",
+)
+parser.add_argument(
+    "--corner", default="ROADJUNCTION",
+    choices=["ROADJUNCTION", "SW", "SE", "NE", "NW"],
+    help="Named spawn point. ROADJUNCTION (default) = SM_RoadJunction_Plus28 "
+         "+ 1m alt = (40.7, 17.1, 1.3) — proven open spot. SW/SE/NE/NW "
+         "compute corners as ROADJUNCTION ± map-half-size on each axis "
+         "(useful for the mission_demo which expects to start at a corner).",
+)
+parser.add_argument(
+    "--map-half-size", type=float, default=80.0,
+    help="Half-side of the square map in meters. Used to compute the "
+         "SW/SE/NE/NW spawn points (not loaded into the USD).",
 )
 parser.add_argument(
     "--bf-host", default="127.0.0.1",
@@ -138,6 +152,23 @@ def _preflight_or_die() -> None:
     print("[final_world_betaflight] Pre-flight: BF SITL MSP up.", flush=True)
 
 
+def _resolve_spawn_or_die() -> None:
+    """Compute final spawn point. --spawn wins over --corner. Mutates args."""
+    if args.spawn is not None:
+        return
+    rx, ry, rz = (40.7, 17.1, 1.3)  # SM_RoadJunction_Plus28
+    h = args.map_half_size
+    args.spawn = {
+        "ROADJUNCTION": [rx, ry, rz],
+        "SW": [rx - h, ry - h, rz],
+        "SE": [rx + h, ry - h, rz],
+        "NE": [rx + h, ry + h, rz],
+        "NW": [rx - h, ry + h, rz],
+    }[args.corner]
+    print(f"[final_world_betaflight] Spawn from --corner={args.corner} "
+          f"+ map_half_size={h}m → {tuple(args.spawn)}", flush=True)
+
+
 def _validate_paths_or_die() -> None:
     if not os.path.exists(args.usd):
         print(
@@ -157,6 +188,7 @@ def _validate_paths_or_die() -> None:
 
 # Pre-flight runs BEFORE SimulationApp() so we don't pay the 30s Isaac startup
 # just to discover BF isn't running.
+_resolve_spawn_or_die()
 _validate_paths_or_die()
 _preflight_or_die()
 
