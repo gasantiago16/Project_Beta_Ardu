@@ -38,36 +38,44 @@ the geographically *opposite* corner (NE) for the autoland test.
 
 ## Run — four-terminal workflow
 
-> **Windows pre-flight**: kill any stale Python listener on UDP 19500
-> before T2 (PowerShell: `Get-Process python | Stop-Process -Force`).
+All Python terminals use the **`isaaclab311`** conda env on Windows
+(`C:\miniconda3\envs\isaaclab311\`) — that's where Isaac Sim, Pegasus,
+pygame, and the mission's deps all live. Set `$PY` once for brevity:
+
+```powershell
+$PY = "C:\miniconda3\envs\isaaclab311\python.exe"
+$PROJ = "C:\Users\Gabriel Santiago\Project_Beta_Ardu"
+```
+
+> **Windows pre-flight (T2)**: kill any stale Python listener on UDP
+> 19500 before launching the bridge.
+> `Get-Process python -EA SilentlyContinue | Stop-Process -Force`.
 > Stale listeners with `SO_REUSEADDR` can split-receive motor packets
-> and cause the bridge to think it's getting nothing.
+> and the bridge will see `rx=0`.
 
-```bash
-# T1: BF SITL container.
-cd ~/Project_Beta_Ardu
+```powershell
+# T1: BF SITL container (Docker Desktop must be running).
+cd $PROJ
 docker compose -f sitl/docker-compose.yml up
-# Wait for "[sitl] Ready. SITL pid=N" + "Phase echoes confirmed".
+# Wait for "[sitl] Ready. SITL pid=N" + the Phase echoes confirmed lines.
 
-# (optional) Confirm the wire path before launching Isaac Sim:
-#   python -m integrations.tools.fake_pegasus_loop --duration 3
-#   Expect tx=150 rx≈75 in ~38 s — 50% drop is BF main-loop / FDM
-#   rate mismatch on a disarmed FC, not a wire bug.
+# (optional) Wire smoke test before paying the 30 s Isaac Sim warmup:
+#   & $PY -m integrations.tools.fake_pegasus_loop --duration 3
+#   Expect tx=150 rx≈75 in ~38 s — 50% drop is BF main-loop / FDM rate
+#   mismatch on a disarmed FC, not a wire bug.
 
 # T2: Pegasus + Iris in Final_World, spawning at SW corner.
 #     Bridge auto-binds host UDP 19500 (relay target) for motor RX.
-cd ~/PegasusSimulator
-python ~/Project_Beta_Ardu/integrations/orchestrators/final_world_betaflight.py \
-    --corner SW
+& $PY "$PROJ\integrations\orchestrators\final_world_betaflight.py" --corner SW
 
-# T3 (optional but recommended for the HANDOVER phase): pilot RC.
-cd ~/Project_Beta_Ardu
-python -m integrations.tools.radio_to_bf
-# Or, no radio: --sweep --aux 7=1100 to keep companion-active LOW.
+# T3 (optional, for HANDOVER): pilot RC over the Radiomaster Pocket.
+cd $PROJ
+& $PY -m integrations.tools.radio_to_bf
+# No radio handy? `--sweep --aux 7=1100` keeps AUX1 LOW so companion controls.
 
-# T4: the mission.
-cd ~/Project_Beta_Ardu
-python -m integrations.tools.mission_demo
+# T4: fly the mission.
+cd $PROJ
+& $PY -m integrations.tools.mission_demo
 ```
 
 ## What you should see
