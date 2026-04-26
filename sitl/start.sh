@@ -9,7 +9,16 @@
 set -e
 
 echo "[sitl] Starting Betaflight SITL..."
-./betaflight_SITL &
+# BF SITL takes the simulator host as argv[1] — that's the destination for
+# its motor packets (PORT_PWM = 9002). Default 127.0.0.1 only works when
+# the bridge runs inside the container. From the host (Pegasus / fake_pegasus
+# _loop), motor packets must be addressed to the host bridge gateway. Docker
+# Desktop exposes that as `host.docker.internal`; on plain-Linux Docker we
+# rely on the docker-compose `extra_hosts: host-gateway` mapping for the
+# same name. SITL_SIM_HOST overrides the default.
+SIM_HOST="${SITL_SIM_HOST:-host.docker.internal}"
+echo "[sitl] BF will send motor packets to ${SIM_HOST}:9002"
+./betaflight_SITL "${SIM_HOST}" &
 SITL_PID=$!
 
 cleanup() {

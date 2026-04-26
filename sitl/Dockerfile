@@ -40,10 +40,16 @@ COPY defaults.txt ./defaults.txt
 COPY start.sh ./start.sh
 RUN chmod +x ./start.sh ./betaflight_SITL
 
-# BF SITL ports (defaults; verify in your BF version):
+# BF SITL ports (per BF 4.5.1 src/main/target/SITL/sitl.c):
 #   5761 — MSP / CLI TCP
-#   9002 — sensor input UDP (sim → BF)
-#   9003 — motor output UDP (BF → sim)
-EXPOSE 5761 9002 9003
+#   9001 — PORT_PWM_RAW UDP (BF → sim, raw PWM output, unused by us)
+#   9002 — PORT_PWM     UDP (BF → sim, normalized motor output 0..1)
+#   9003 — PORT_STATE   UDP (sim → BF, FDM sensor input)
+#   9004 — PORT_RC      UDP (sim → BF, pilot RC injection — Phase 4)
+# BF sends to (simulator_ip, 9002); simulator_ip is argv[1] to the SITL
+# binary, default "127.0.0.1". For Docker we pass `host.docker.internal`
+# (or override via the SITL_SIM_HOST env var) in start.sh so motor packets
+# reach the host process across the container boundary.
+EXPOSE 5761 9002 9003 9004
 
 CMD ["./start.sh"]

@@ -6,7 +6,17 @@ services:
         BETAFLIGHT_REF: 4.5.1
     container_name: project-beta-ardu-sitl
     ports:
-      - "5761:5761"   # MSP / CLI TCP
-      - "9002:9002/udp"
-      - "9003:9003/udp"
+      - "5761:5761"      # MSP / CLI TCP — racer_companion connects here
+      - "9002:9002/udp"  # PORT_PWM      — BF sends motor packets to host
+      - "9003:9003/udp"  # PORT_STATE    — host sends FDM packets to BF
+      - "9004:9004/udp"  # PORT_RC       — Phase 4 pilot RC inject (Radiomaster)
+    environment:
+      # Where BF sends motor packets. Defaults to host.docker.internal which
+      # works on Docker Desktop (Win/Mac) and plain-Linux via the
+      # `extra_hosts: host-gateway` mapping below.
+      SITL_SIM_HOST: "${SITL_SIM_HOST:-host.docker.internal}"
+    extra_hosts:
+      # Required on Linux Docker (without Docker Desktop) so the container
+      # can resolve host.docker.internal to the host bridge gateway.
+      - "host.docker.internal:host-gateway"
     restart: unless-stopped
