@@ -119,9 +119,26 @@ class BetaflightBackendConfig:
     origin_alt_m: float = 100.0
     pressure_sea_level_pa: float = _ISA_SEA_LEVEL_PA
 
-    # Phase-6 mag-NONE drift simulation (rad/s constant bias added to gyro
-    # before sending to BF). Default 0 = noiseless. ~0.0003 ≈ 1°/min drift.
+    # ── Phase-6 sensor noise + mag-NONE drift simulation ─────────────────
+    # Default 0 = noiseless. With these set, BF runs against an IMU stream
+    # that mimics the imperfections that drive heading divergence in real
+    # mag-NONE flight, so the racer_companion's heading-divergence watchdog
+    # (BUG-6 fix from v0.4) can be validated end-to-end in motion.
+    #
+    # `gyro_bias_drift_rad_s` — constant bias on every gyro axis. ~0.0003
+    # rad/s = ~1°/min, the upper bound of typical MEMS gyro drift. Causes
+    # the bearing controller's heading estimate to walk off over minutes.
     gyro_bias_drift_rad_s: float = 0.0
+    # `gyro_noise_std_rad_s` — white-noise σ per gyro axis. ~0.005 rad/s
+    # is a low-grade MEMS gyro noise floor. Drives short-term jitter that
+    # PIDs damp out but builds up under integration.
+    gyro_noise_std_rad_s: float = 0.0
+    # `accel_noise_std_m_s2` — white-noise σ per accel axis. ~0.05 m/s²
+    # is realistic. Mostly cosmetic (BF's attitude estimator filters hard).
+    accel_noise_std_m_s2: float = 0.0
+    # Optional RNG seed for noise generation. None = numpy default
+    # (non-deterministic). Pin to make a noise scenario reproducible.
+    noise_seed: int | None = None
 
 
 # ── Wire-format helpers ─────────────────────────────────────────────────────
@@ -249,6 +266,9 @@ class BetaflightUdpBackend:
         self._packets_tx: int = 0
         # Cache the gyro bias as a vector so we don't reallocate per tick.
         self._gyro_bias = np.zeros(3)
+        # RNG for noise. Re-seeded from config in start(); fallback in
+        # __init__ so _pack_fdm can be unit-tested without going through start().
+        self._rng = np.random.default_rng(0)
 
     # ── Pegasus Backend interface ───────────────────────────────────────
 
@@ -284,6 +304,7 @@ class BetaflightUdpBackend:
         self._packets_rx = 0
         self._packets_tx = 0
         self._gyro_bias = np.array([self.config.gyro_bias_drift_rad_s] * 3)
+        self._rng = np.random.default_rng(self.config.noise_seed)
         log.info(
             "BetaflightUdpBackend started: bind 0.0.0.0:%d, send→%s:%d",
             self.config.motor_port, self.config.bf_host, self.config.fdm_port,
@@ -397,7 +418,15 @@ class BetaflightUdpBackend:
         silently feeding NaN to the FC.
         """
         omega_frd = _state_angular_velocity_frd(state) + self._gyro_bias
+        if self.config.gyro_noise_std_rad_s > 0:
+            omega_frd = omega_frd + self._rng.normal(
+                0.0, self.config.gyro_noise_std_rad_s, size=3,
+            )
         accel_frd = _state_linear_acceleration_body_frd(state)
+        if self.config.accel_noise_std_m_s2 > 0:
+            accel_frd = accel_frd + self._rng.normal(
+                0.0, self.config.accel_noise_std_m_s2, size=3,
+            )
         q_xyzw_ned_frd = _state_attitude_ned_frd(state)
         qw, qx, qy, qz = _quat_pegasus_to_bf(q_xyzw_ned_frd)
 

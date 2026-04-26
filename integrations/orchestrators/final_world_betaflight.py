@@ -205,7 +205,14 @@ simulation_app = SimulationApp({
 
 import omni  # noqa: E402
 import omni.timeline  # noqa: E402
-from omni.isaac.core.world import World  # noqa: E402
+# Isaac Sim 4.x: `omni.isaac.core.world.World`. Isaac Sim 5.x renamed to
+# `isaacsim.core.api.World`. Try the modern path first; fall back so this
+# orchestrator works on both 4.x (where the user's prior teleop_final_world.py
+# was written) and 5.1 (current Isaac Sim release).
+try:
+    from isaacsim.core.api import World  # noqa: E402
+except ImportError:
+    from omni.isaac.core.world import World  # noqa: E402
 from pxr import UsdGeom, UsdLux, Gf  # noqa: E402
 
 from pegasus.simulator.params import ROBOTS  # noqa: E402

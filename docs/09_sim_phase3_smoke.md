@@ -100,9 +100,13 @@ Once the waypoint is calibrated:
 2. **Check the companion is talking** in T3 — look for "Home set:" log
    line. That fires on the first GPS reading meeting `min_satellites=8`.
 3. **Engage AUX-companion-active**: flip the radio AUX channel
-   (`aux_channel_index=6`, i.e., AUX3) to high (>= 1700 µs). If you don't
-   have a radio yet, manually craft an MSP_SET_RAW_RC over a separate
-   tool, OR wait for Phase 4.
+   (`aux_channel_index=6`, i.e., AUX3) to high (>= 1700 µs). Three ways:
+   - **With radio (Phase 4)**: `python -m tools.radio_to_bf` from
+     `companion/`, then flip AUX3 high on the Radiomaster.
+   - **No radio, force AUX3 high** (Phase 4): `python -m tools.radio_to_bf
+     --sweep --aux 7=1900` — sticks idle, AUX3 forced high.
+   - **No radio at all**: arm + manual fly via QGC's joystick widget,
+     then craft an MSP_SET_RAW_RC manually. Phase 4 is the cleaner path.
 4. **Watch state transitions** in T3:
    ```
    IDLE → CLIMB → TRANSIT → HOLD
@@ -138,6 +142,15 @@ Once the waypoint is calibrated:
   physics tick lands ~30 s after Isaac launch. Companion polling MSP
   earlier sees no telemetry until then — totally expected; clears once
   T2 finishes warming up.
+- **First-tick FDM dead-air, ~1 s.** The bridge needs `update_state` to
+  fire before `update(dt)` can pack an FDM packet, and Pegasus's
+  callbacks aren't strictly synchronized. So `[bridge] tx=0 rx=0` is
+  expected for the first 1-2 seconds, then jumps to ~250 Hz. If it
+  stays at 0 past 5s, something's actually broken — see fake_pegasus_loop.
+- **`no_rc_telemetry` if you didn't start `radio_to_bf` (or QGC joystick).**
+  BF SITL doesn't synthesize MSP_RC values without UDP 9004 input. Either
+  start `radio_to_bf` first, OR connect QGC's joystick widget, OR set
+  `safety._skip_rc_check` in a future config (deferred).
 - **`transit_runaway_*` if you skipped calibration.** With the placeholder
   waypoint at (0,0), distance to target is ~7000 km. Once state ticks past
   CLIMB → TRANSIT, the v0.4 BUG-3 runaway guard fires and forces RELEASED.

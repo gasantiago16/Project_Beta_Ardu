@@ -17,15 +17,15 @@ script reads up to 8 axes from the joystick and pads channels 9-16 with
 1500 µs (centered) before packing.
 
 Usage:
-    cd ~/Project_Beta_Ardu/companion
-    python -m tools.radio_to_bf                     # default Radiomaster Pocket map
-    python -m tools.radio_to_bf --dry-run           # print PWM, don't send (calibration)
-    python -m tools.radio_to_bf --sweep             # synthetic sine sweep — no radio needed
-    python -m tools.radio_to_bf --bf-host 192.168.1.5  # remote SITL
+    cd ~/Project_Beta_Ardu
+    python -m integrations.tools.radio_to_bf                 # default Radiomaster Pocket map
+    python -m integrations.tools.radio_to_bf --dry-run       # print PWM, don't send (calibration)
+    python -m integrations.tools.radio_to_bf --sweep         # synthetic sine sweep — no radio needed
+    python -m integrations.tools.radio_to_bf --bf-host 192.168.1.5  # remote SITL
 
-Channel mapping is in `companion/config/radiomaster_pocket.json`. Edit
-that file if your radio's USB joystick output differs from the AETR
-default (axis 0=roll, 1=pitch, 2=throttle, 3=yaw, 4-7=AUX1-4).
+Channel mapping is in `integrations/configs/radiomaster_pocket.json`.
+Edit that file if your radio's USB joystick output differs from the
+AETR default (axis 0=roll, 1=pitch, 2=throttle, 3=yaw, 4-7=AUX1-4).
 
 Architecture note: this is independent of racer_companion. The companion
 talks MSP TCP 5761; this talks UDP 9004. They coexist without conflict
@@ -185,7 +185,7 @@ def main() -> int:
                    help="UDP transmit rate (default 50 Hz, BF default RC frame rate).")
     p.add_argument("--config", type=Path,
                    default=Path(__file__).resolve().parents[1] /
-                           "config" / "radiomaster_pocket.json",
+                           "configs" / "radiomaster_pocket.json",
                    help="Channel mapping JSON.")
     p.add_argument("--joystick-index", type=int, default=0,
                    help="pygame joystick index (default 0). List with --list-joysticks.")

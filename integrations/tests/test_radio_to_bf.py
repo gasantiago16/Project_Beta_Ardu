@@ -146,7 +146,7 @@ class TestUdpPacketLayout(unittest.TestCase):
 class TestLoadMapping(unittest.TestCase):
     def test_default_radiomaster_pocket_loads(self):
         path = (Path(__file__).resolve().parents[1] /
-                "config" / "radiomaster_pocket.json")
+                "configs" / "radiomaster_pocket.json")
         mapping = rb.load_mapping(path)
         # 8 channels expected.
         self.assertEqual(len(mapping), 8)
@@ -240,7 +240,7 @@ class TestFakeJoystickIntegration(unittest.TestCase):
         # axes 4-7 (aux)    =  0.0  → 1500 each
         js = FakeJoystick([0.6, 0.0, -1.0, 0.05, 0.0, 0.0, 0.0, 0.0])
         path = (Path(__file__).resolve().parents[1] /
-                "config" / "radiomaster_pocket.json")
+                "configs" / "radiomaster_pocket.json")
         mapping = rb.load_mapping(path)
         axis_vals = [js.get_axis(i) for i in range(js.get_numaxes())]
         channels = rb.channels_from_axes(axis_vals, mapping)

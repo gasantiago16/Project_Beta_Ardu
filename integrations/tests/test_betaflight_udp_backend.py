@@ -439,6 +439,90 @@ class TestBackendLockstep(unittest.TestCase):
         with self.assertRaises(ValueError):
             be._pack_fdm(st, sim_time=1.0)
 
+    def test_gyro_bias_applied_to_fdm_omega(self):
+        # With gyro_bias_drift_rad_s set, every FDM packet's gyro field
+        # MUST carry the bias added on top of the rigid-body angular vel.
+        bias = 0.0003
+        cfg = BetaflightBackendConfig(
+            fdm_port=0, motor_port=0, gyro_bias_drift_rad_s=bias,
+        )
+        be = BetaflightUdpBackend(cfg)
+        be.start()
+        try:
+            st = hovering_state()  # angular_velocity = (0, 0, 0)
+            blob = be._pack_fdm(st, sim_time=1.0)
+            f = struct.unpack("<18d", blob)
+            # gyro field is fields 1-3 (after timestamp). Each axis = +bias.
+            for i in (1, 2, 3):
+                self.assertAlmostEqual(f[i], bias, places=10)
+        finally:
+            be.stop()
+
+    def test_gyro_noise_std_drives_jitter(self):
+        # With gyro_noise_std > 0, repeated _pack_fdm calls on a stationary
+        # quad MUST produce gyro values that vary tick-to-tick (jitter).
+        # Without noise, repeats are identical.
+        cfg = BetaflightBackendConfig(
+            fdm_port=0, motor_port=0,
+            gyro_noise_std_rad_s=0.01, noise_seed=42,
+        )
+        be = BetaflightUdpBackend(cfg)
+        be.start()
+        try:
+            st = hovering_state()
+            samples = []
+            for i in range(50):
+                blob = be._pack_fdm(st, sim_time=i * 0.004)
+                f = struct.unpack("<18d", blob)
+                samples.append((f[1], f[2], f[3]))  # ω_xyz
+            # At least 95% of samples are unique across the population
+            # (collisions would mean RNG isn't producing variation).
+            self.assertGreater(len(set(samples)), 47)
+            # Sample-mean ≈ 0 within a few σ of population mean.
+            mean_x = sum(s[0] for s in samples) / len(samples)
+            self.assertLess(abs(mean_x), 0.01)  # 50-sample mean of N(0, 0.01)
+        finally:
+            be.stop()
+
+    def test_noise_seed_makes_run_deterministic(self):
+        # Two backends with the same seed produce identical FDM streams.
+        # Pinning a seed lets us reproduce a divergence run for debugging.
+        def gather(seed):
+            cfg = BetaflightBackendConfig(
+                fdm_port=0, motor_port=0,
+                gyro_noise_std_rad_s=0.01, noise_seed=seed,
+            )
+            be = BetaflightUdpBackend(cfg)
+            be.start()
+            try:
+                st = hovering_state()
+                return [be._pack_fdm(st, sim_time=i * 0.004)
+                        for i in range(20)]
+            finally:
+                be.stop()
+
+        self.assertEqual(gather(42), gather(42))
+        self.assertNotEqual(gather(42), gather(43))
+
+    def test_zero_noise_zero_bias_matches_pre_phase_6(self):
+        # Default config = noiseless = bit-identical to pre-Phase-6 behavior.
+        # Catches accidental "noise on by default" regressions.
+        cfg = BetaflightBackendConfig(fdm_port=0, motor_port=0)
+        self.assertEqual(cfg.gyro_bias_drift_rad_s, 0.0)
+        self.assertEqual(cfg.gyro_noise_std_rad_s, 0.0)
+        self.assertEqual(cfg.accel_noise_std_m_s2, 0.0)
+        self.assertIsNone(cfg.noise_seed)
+        be = BetaflightUdpBackend(cfg)
+        be.start()
+        try:
+            st = hovering_state()
+            blob1 = be._pack_fdm(st, sim_time=1.0)
+            blob2 = be._pack_fdm(st, sim_time=1.0)
+            # Identical inputs → identical outputs (no noise).
+            self.assertEqual(blob1, blob2)
+        finally:
+            be.stop()
+
     def test_motor_saturation_bounds(self):
         # Motor packet of (0.0, 1.0) bounds; verify input_reference scales correctly.
         # Backend must be started so input_reference() returns the cached

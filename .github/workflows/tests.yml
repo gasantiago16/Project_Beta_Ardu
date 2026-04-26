@@ -22,6 +22,21 @@ jobs:
         working-directory: companion
         run: python -m unittest discover -s tests -t . -v
 
+  integrations-tests:
+    name: Integrations (BF↔Pegasus bridge + airframe registry)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install integrations deps + companion (for cross-imports)
+        run: |
+          pip install numpy scipy
+          pip install -e companion
+      - name: Run integrations unit tests (Pegasus runtime not required)
+        run: python -m unittest discover -s integrations/tests -t . -v
+
   scripts-tests:
     name: Scripts (Lua + tooling)
     runs-on: ubuntu-latest

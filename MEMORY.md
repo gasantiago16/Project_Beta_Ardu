@@ -23,6 +23,41 @@ project state.
 
 ---
 
+## Snapshot — v0.6 (Apr 25 2026, HITL sim integration)
+
+| Component | Status | Validated |
+|-----------|--------|-----------|
+| Companion Python library (`companion/`) | ✅ unchanged from v0.5 | 159 unit tests + 9 hypothesis on push CI |
+| BF SITL ↔ Pegasus UDP bridge (`integrations/pegasus_betaflight_backend.py`) | ✅ shipped | 35 unit tests; integration test gated on real BF SITL Docker |
+| Pegasus orchestrator (`integrations/orchestrators/final_world_betaflight.py`) | ✅ shipped | manual end-to-end (Final_World + Iris + BF SITL) |
+| Pilot RC injector (`integrations/tools/radio_to_bf.py`) | ✅ shipped | 27 unit tests + fake-pygame integration |
+| Airframe profile registry (`integrations/configs/airframes.py`) | ✅ shipped | 21 unit tests incl. URDF parse + T:W computation |
+| 5" race-quad URDF (`assets/racer_5in/racer_5in.urdf`) | ✅ shipped, **USD regen needed locally** | URDF parses; rotor positions verified X-config |
+| Sensor noise + mag-NONE drift (Phase 6) | ✅ shipped | 4 unit tests + standalone watchdog driver |
+| Sim smoke procedure | ✅ docs/09..12 | Phase 3-6 docs each |
+| CI: integrations job | ✅ added | runs `python -m unittest discover -s integrations/tests` |
+
+**Branch `pegasus-bridge`** off `safety-defense-in-depth`. Three PR-pending phases. Test totals: ~159 companion + ~83 integrations + 11 Lua + 18 preflight + 12 tune-heading.
+
+### v0.6 changes — HITL sim integration (Phases 1-6)
+
+Goal: validate companion in PegasusSimulator + Final_World (TIAMAT chemical plant) before any real-hardware flight. "As close to real as possible" → BF SITL ↔ Pegasus UDP bridge (companion talks unmodified MSP), not a MAVLink shim.
+
+- **Phase 1 — UDP bridge**: `integrations/pegasus_betaflight_backend.py`. fdm_packet (UDP 9003, 18 doubles, 144B) Sim→BF; servo_packet (UDP 9002, 4 floats, 16B) BF→Sim. Verified against actual BF source — counter-agent caught 5 wire-format bugs (ports reversed in Dockerfile comments, position is NED meters not lon/lat, accel is "+g on z-down" not specific-force, BF doesn't auto-reply). `host.docker.internal` plumbing added so motor packets reach the host from inside the container.
+- **Phase 2 — orchestrator**: `integrations/orchestrators/final_world_betaflight.py`. Pre-flight TCP probe before paying Isaac's 30s warmup. Periodic bridge stats every 5s. Iris in chemical plant.
+- **Phase 3 — companion wiring**: `companion/config/sim_waypoint.json`, `integrations/tools/discover_bf_gps.py`. No companion code changes. `min_vbat=0.0` is sim-only because BF SITL replies vbat=0.0.
+- **Phase 4 — pilot RC**: `integrations/tools/radio_to_bf.py` + `integrations/configs/radiomaster_pocket.json`. Counter-agent caught BF's `rc_packet` is 40B (`<d16H`), not 16B as I'd assumed — same Phase-1-class bug. `--aux CH=PWM` for testing without a radio. `--sweep` mode.
+- **Phase 5 — race-quad**: `assets/racer_5in/racer_5in.urdf` + `integrations/configs/airframes.py`. `--airframe iris|racer5` flag. Counter-agent caught two BLOCKERs: thrust curve wasn't actually wired (Iris-tuned defaults applied to race-quad → T:W~54), and c_Q was 1000× too high (yaw flip-spin on stick input). Now shipping with c_T=1.7e-6, c_Q=2.0e-8, T:W~10.
+- **Phase 6 — sensor noise**: `BetaflightBackendConfig.gyro_bias_drift_rad_s`, `gyro_noise_std_rad_s`, `accel_noise_std_m_s2`, `noise_seed`. Standalone driver `integrations/tools/drive_heading_divergence.py` validates the v0.4 BUG-6 watchdog end-to-end with realistic ~1°/min mag-NONE drift.
+
+### v0.6 sharp edges
+
+- **BF SITL UDP wire format is verified against `betaflight/4.5.1/src/main/target/SITL/sitl.c` + `target.h`. Don't trust prior research summaries or Dockerfile comments — they had multiple errors. `fdm_packet` = 18 doubles / 144B; `servo_packet` = 4 floats / 16B; `rc_packet` = 1 double + 16 uint16 / 40B. BF strict-checks packet size; wrong size = silent drop.**
+- **`MultirotorConfig.thrust_curve` MUST be set per-airframe.** Just changing the USD doesn't change the thrust math — Pegasus uses `MultirotorConfig` defaults if you don't override. Race-quad with Iris thrust = T:W 54 = instant divergence. Orchestrator now plumbs `QuadraticThrustCurve` from the profile registry.
+- **`c_Q / c_T` ratio MUST be ~0.012 for 5" props.** Higher → flip-spin yaw; lower → no yaw response. `test_torque_to_thrust_ratio_in_band` pins it.
+- **First-tick FDM dead-air, ~1 s.** `update_state` and `update(dt)` fire from different Pegasus callbacks, ordering not strict. Bridge bails on first tick when `_latest_state is None`. Visible as `[bridge] tx=0` for ~1 s after timeline play.
+- **Race-quad USD must be regenerated locally** from URDF via Isaac Sim importer. `.gitignore` excludes `*.usd*` under `assets/`. See `assets/racer_5in/README.md`.
+
 ## Snapshot — v0.5 (Apr 25 2026, capability + quality pass)
 
 | Component | Status | Validated |
