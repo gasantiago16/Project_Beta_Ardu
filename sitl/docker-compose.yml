@@ -7,14 +7,27 @@ services:
     container_name: project-beta-ardu-sitl
     ports:
       - "5761:5761"      # MSP / CLI TCP — racer_companion connects here
-      - "9002:9002/udp"  # PORT_PWM      — BF sends motor packets to host
       - "9003:9003/udp"  # PORT_STATE    — host sends FDM packets to BF
       - "9004:9004/udp"  # PORT_RC       — Phase 4 pilot RC inject (Radiomaster)
+      # NOTE: 9002 is intentionally NOT mapped. By default (Windows), BF's
+      # motor packets go to 127.0.0.1:9002 inside the container, where
+      # socat picks them up and forwards to host:${SITL_HOST_MOTOR_PORT}
+      # (default 19500). The bridge listens there.
+      # On Linux/Mac without the Windows Defender block, set
+      # SITL_USE_MOTOR_RELAY=0 + SITL_HOST_MOTOR_PORT=9002 and add
+      # "9002:9002/udp" back here.
     environment:
-      # Where BF sends motor packets. Defaults to host.docker.internal which
-      # works on Docker Desktop (Win/Mac) and plain-Linux via the
-      # `extra_hosts: host-gateway` mapping below.
+      # Where BF sends motor packets. host.docker.internal works on Docker
+      # Desktop (Win/Mac) and plain-Linux via the `extra_hosts: host-gateway`
+      # mapping below. start.sh resolves it to IPv4 since BF inet_addr() is
+      # IPv4-only.
       SITL_SIM_HOST: "${SITL_SIM_HOST:-host.docker.internal}"
+      # Where the in-container socat relay forwards motor packets. Must
+      # match BetaflightBackendConfig.motor_port on the host bridge side.
+      SITL_HOST_MOTOR_PORT: "${SITL_HOST_MOTOR_PORT:-19500}"
+      # Set 0 on Linux/Mac to skip the relay entirely (BF will send motors
+      # straight to ${SITL_SIM_HOST}:9002 — re-add the 9002 port mapping).
+      SITL_USE_MOTOR_RELAY: "${SITL_USE_MOTOR_RELAY:-1}"
     extra_hosts:
       # Required on Linux Docker (without Docker Desktop) so the container
       # can resolve host.docker.internal to the host bridge gateway.

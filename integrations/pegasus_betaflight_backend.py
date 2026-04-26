@@ -88,8 +88,12 @@ class BetaflightBackendConfig:
     """Caller-tunable config for the bridge.
 
     Defaults assume:
-    - BF SITL Docker container running on the local host with port mappings
-      from `Project_Beta_Ardu/sitl/docker-compose.yml` (9002/9003 udp).
+    - BF SITL Docker container running on the local host. Compose maps
+      `5761/tcp` (MSP) + `9003/udp` (FDM) + `9004/udp` (RC). Motor packets
+      come back via the in-container socat relay onto host UDP 19500
+      (see sitl/start.sh + sitl/docker-compose.yml). On a Linux/Mac host
+      without the Windows Defender block on 9002 you can set
+      `SITL_USE_MOTOR_RELAY=0` and override `motor_port=9002` here.
     - Iris airframe (Pegasus default) — `rotor_max_omega` derived from a 880
       KV motor on 11.1 V × 2π/60. For a 5" race quad in Phase 5, override to
       ~3000 rad/s.
@@ -99,8 +103,14 @@ class BetaflightBackendConfig:
     bf_host: str = "127.0.0.1"
     # Sim→BF: BF listens here for FDM sensor data (BF source: PORT_STATE=9003).
     fdm_port: int = 9003
-    # BF→Sim: BF sends motor commands here. We bind to receive (PORT_PWM=9002).
-    motor_port: int = 9002
+    # BF→Sim: motor packets. BF source PORT_PWM is hardcoded to 9002, but
+    # Windows Defender Firewall on this host blocks inbound UDP 9002
+    # specifically (other ports work — verified). The SITL container runs
+    # an internal socat relay (see sitl/start.sh) that captures BF's
+    # 127.0.0.1:9002 motor packets and forwards them to host:19500. So
+    # the bridge listens on 19500 instead. On a Linux/Mac host without
+    # the firewall block, override to 9002 and disable the relay.
+    motor_port: int = 19500
 
     # Iris hover at 880 KV × 11.1 V × (2π/60) ≈ 1023 rad/s. Multirotor
     # PWM-normalized → ω is `motor[i] * rotor_max_omega`.
@@ -376,7 +386,7 @@ class BetaflightUdpBackend:
             # hovering quad on a single dropped packet.
             self._timeouts += 1
             if self._timeouts == 50:
-                log.warning("BF SITL motor packet timeout #50 — check container")
+                log.warning("BF SITL motor packet timeout #50 - check container")
         except ConnectionResetError as e:
             # Windows fallback (in case SIO_UDP_CONNRESET ioctl was rejected):
             # treat ICMP-unreachable as a timeout, not a fatal error.

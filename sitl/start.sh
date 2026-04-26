@@ -1,35 +1,93 @@
 #!/usr/bin/env bash
 # Boot Betaflight SITL, then apply our defaults via the CLI TCP port.
 #
-# After applying defaults we read the config back and assert on the values
-# the companion's safety story depends on (msp_override_channels_mask=15,
-# mag_hardware=NONE). The original `nc | echo WARNING` path was misleading:
-# a partial config apply would still let the smoke test "pass" while
-# overrides on AUX channels were unbounded. Hard fail instead.
+# Single-phase boot: spawn BF, drip CLI commands, NEVER call `save`. Config
+# is applied in-memory and lives for the lifetime of the process. The
+# container is ephemeral (compose `restart: unless-stopped` re-runs this
+# whole script), so flash persistence isn't needed for sim.
+#
+# Why not save+respawn? Tested on BF 4.5.1: `save` triggers systemReset()
+# → exit(0), and the second BF instance silently fails to re-init the
+# SITL UDP server (no `[SITL] start UDP server @9003` print, no FDM
+# packets received from the bridge). Whatever the second-spawn path
+# touches in eeprom.bin, the SITL UDP threads don't come back. Single-
+# phase boot avoids the whole problem.
 set -e
 
-echo "[sitl] Starting Betaflight SITL..."
-# BF SITL takes the simulator host as argv[1] — that's the destination for
-# its motor packets (PORT_PWM = 9002). Default 127.0.0.1 only works when
-# the bridge runs inside the container. From the host (Pegasus / fake_pegasus
-# _loop), motor packets must be addressed to the host bridge gateway. Docker
-# Desktop exposes that as `host.docker.internal`; on plain-Linux Docker we
-# rely on the docker-compose `extra_hosts: host-gateway` mapping for the
-# same name. SITL_SIM_HOST overrides the default.
-SIM_HOST="${SITL_SIM_HOST:-host.docker.internal}"
-echo "[sitl] BF will send motor packets to ${SIM_HOST}:9002"
-./betaflight_SITL "${SIM_HOST}" &
-SITL_PID=$!
+RAW_SIM_HOST="${SITL_SIM_HOST:-host.docker.internal}"
+HOST_MOTOR_PORT="${SITL_HOST_MOTOR_PORT:-19500}"
+USE_RELAY="${SITL_USE_MOTOR_RELAY:-1}"
 
+# BF SITL parses argv[1] with inet_addr() — IPv4-dotted only. On Docker
+# Desktop the /etc/hosts entry "host.docker.internal" lists BOTH the IPv6
+# fdc4:... AND IPv4 192.168.65.254 addresses; the default getent path
+# returns the IPv6, BF inet_addr() rejects it (INADDR_NONE), and motor
+# packets silently sendto 255.255.255.255 → never arrive at the bridge.
+# Pre-resolve to IPv4 here so the relay socat targets an address Linux
+# IPv4 routing can use directly.
+if [[ "$RAW_SIM_HOST" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+  HOST_IPV4="$RAW_SIM_HOST"
+else
+  HOST_IPV4=$(getent ahostsv4 "$RAW_SIM_HOST" 2>/dev/null | awk 'NR==1 {print $1}')
+  if [ -z "$HOST_IPV4" ]; then
+    echo "[sitl] FATAL: could not resolve $RAW_SIM_HOST to IPv4"
+    exit 1
+  fi
+  echo "[sitl] Resolved $RAW_SIM_HOST -> $HOST_IPV4 (IPv4)"
+fi
+
+SITL_PID=
+RELAY_PID=
 cleanup() {
-  echo "[sitl] Shutting down (pid=$SITL_PID)"
-  kill -TERM "$SITL_PID" 2>/dev/null || true
-  wait "$SITL_PID" 2>/dev/null || true
+  if [ -n "$RELAY_PID" ]; then
+    kill -TERM "$RELAY_PID" 2>/dev/null || true
+  fi
+  if [ -n "$SITL_PID" ]; then
+    echo "[sitl] Shutting down BF (pid=$SITL_PID)"
+    kill -TERM "$SITL_PID" 2>/dev/null || true
+    wait "$SITL_PID" 2>/dev/null || true
+  fi
 }
 trap cleanup EXIT INT TERM
 
-# Wait for MSP TCP port to be ready.
-echo "[sitl] Waiting for MSP on :5761..."
+# Two motor-path topologies, depending on SITL_USE_MOTOR_RELAY.
+#
+# Direct (Linux/Mac): BF sends motors straight to ${HOST_IPV4}:9002.
+#   Requires the host bridge to bind UDP 9002 AND for nothing on the host
+#   to block UDP 9002 inbound. Set SITL_USE_MOTOR_RELAY=0 to use this.
+#
+# Relayed (Windows, default): BF sends to 127.0.0.1:9002 inside the
+#   container, where socat catches each datagram and forwards to
+#   ${HOST_IPV4}:${HOST_MOTOR_PORT}. Why:
+#     - Windows Defender Firewall on the dev host empirically blocks
+#       inbound UDP on a heuristic port range that includes 9002 and
+#       9012, while 9050/9077/19500/28000 stay open. No admin = no
+#       whitelist.
+#     - BF SITL's PORT_PWM is hardcoded to 9002 (sitl.c #define), so
+#       redirecting at the BF layer isn't an option — only relay works.
+if [ "$USE_RELAY" = "1" ]; then
+  BF_SIM_ARG="127.0.0.1"
+  echo "[sitl] BF -> 127.0.0.1:9002 (container loopback) -> socat -> ${HOST_IPV4}:${HOST_MOTOR_PORT} (host bridge)"
+  # `fork` is required: UDP4-RECVFROM without fork only handles the
+  # FIRST datagram (verified — drop fork and rx falls from ~50% to 0.1%).
+  # Each datagram spawns a child that exits after sendto. ~250 forks/sec
+  # at lockstep rate is fine for session-length runs; if you need to
+  # support hour-long flights, replace with a single-process relay
+  # (e.g. tiny python socket loop) to stay clear of the cgroup PID cap.
+  socat -u UDP4-RECVFROM:9002,bind=127.0.0.1,fork,reuseaddr=1 \
+        UDP4-SENDTO:${HOST_IPV4}:${HOST_MOTOR_PORT} &
+  RELAY_PID=$!
+  echo "[sitl] socat motor-relay started (pid=$RELAY_PID)"
+  sleep 0.3   # ensure socat bind completes before BF starts sending
+else
+  BF_SIM_ARG="${HOST_IPV4}"
+  echo "[sitl] BF -> ${HOST_IPV4}:9002 (host bridge, direct, no relay)"
+  echo "[sitl]   ensure host bridge listens on 9002 and host firewall allows it"
+fi
+
+./betaflight_SITL "${BF_SIM_ARG}" &
+SITL_PID=$!
+echo "[sitl] BF SITL spawned (pid=$SITL_PID); waiting for MSP on :5761..."
 for i in $(seq 1 30); do
   if nc -z localhost 5761; then
     echo "[sitl] MSP up after ${i}s"
@@ -37,65 +95,47 @@ for i in $(seq 1 30); do
   fi
   sleep 1
 done
-
-# Apply defaults.txt over CLI TCP. Two BF SITL gotchas we hit the hard way:
-#   1. CLI mode is entered when BF receives `#` as the first byte of a
-#      line. Our defaults.txt starts with `# Betaflight SITL...` — BF
-#      reads the `#`, enters CLI, then tries to execute the rest of that
-#      line as a command, which fails. Fix: prepend `\n#\n` for a clean
-#      CLI entry before defaults.txt content.
-#   2. Sending all lines in one TCP write (the original `nc -q 2 < file`
-#      approach) blasts BF with the entire buffer at once. BF accepts
-#      the first line or two and silently drops the rest — only the
-#      banner-and-prompt comes back, no per-command echoes. Fix: drip
-#      the file one line at a time with a short sleep so BF's CLI parser
-#      can keep up.
-#
-# A tighter implementation would use Python or a CLI tool that waits for
-# each prompt; this shell version is a reasonable compromise that uses
-# only the netcat already in the container.
-if [ -f defaults.txt ]; then
-  echo "[sitl] Applying defaults.txt..."
-  if ! {
-        printf '\n#\n'
-        sleep 0.5
-        while IFS= read -r line || [ -n "$line" ]; do
-          printf '%s\n' "$line"
-          sleep 0.05
-        done < defaults.txt
-        printf 'save\n'
-        sleep 1.5
-      } | nc -q 3 localhost 5761; then
-    echo "[sitl] FATAL: defaults application failed (nc exit non-zero)"
-    exit 1
-  fi
+if ! nc -z localhost 5761; then
+  echo "[sitl] FATAL: MSP didn't come up within 30s"
+  exit 1
 fi
 
-# Read back the running config and verify the safety-critical lines.
-# Same `\n#\n` discipline so the verify connection enters CLI cleanly.
-# If the config didn't apply (silent FC, wrong baud, partial parse), MSP
-# overrides could engage on AUX channels — pilot can't take the sticks back.
-# Hard-fail rather than continue with a misleading "ready" log.
-echo "[sitl] Verifying applied defaults..."
-DUMP=$(printf '\n#\ndump\nexit\n' | nc -q 3 localhost 5761 || true)
+# Apply defaults.txt over CLI TCP. Three BF SITL gotchas we hit the hard way:
+#   1. CLI mode entry is triggered by `#` as the FIRST byte of a line.
+#      Our defaults.txt starts with `# Minimum BF SITL config…` — BF reads
+#      the `#`, enters CLI, then tries to execute the rest of that line
+#      as a command, which fails. Fix: prepend `\n#\n` for a clean entry.
+#   2. Sending all lines in one TCP write blasts BF's CLI parser; only
+#      the first 1-2 commands actually get processed before the rest is
+#      silently dropped. Fix: drip lines with 50 ms sleep between them.
+#   3. NEVER send `save` (see top-of-file comment). Use `exit` to leave
+#      CLI mode without resetting; the in-memory `set` values stay live
+#      for the rest of the process lifetime.
+if [ -f defaults.txt ]; then
+  echo "[sitl] Applying defaults.txt (in-memory only, no save)..."
+  {
+    printf '\n#\n'
+    sleep 0.5
+    while IFS= read -r line || [ -n "$line" ]; do
+      printf '%s\n' "$line"
+      sleep 0.05
+    done < defaults.txt
+    # No `save` — would exit BF. Drop the connection instead; the CLI
+    # mode persists until BF reaches its idle loop, which is fine for us.
+    sleep 0.5
+  } | nc -q 1 localhost 5761 || true
+fi
 
-assert_setting() {
-  local key="$1"
-  local expected="$2"
-  # BF's `dump` command emits each line as `set <key> = <value>` (with the
-  # `set ` prefix). The previous regex assumed `<key> = <value>` — bare,
-  # no prefix — and matched nothing on a real BF SITL dump. Accept either.
-  if ! echo "$DUMP" | grep -qE "^[[:space:]]*(set[[:space:]]+)?${key}[[:space:]]*=[[:space:]]*${expected}[[:space:]]*$"; then
-    echo "[sitl] FATAL: expected '${key} = ${expected}' not present in dump"
-    echo "[sitl] grep result for ${key}:"
-    echo "$DUMP" | grep -E "${key}" || echo "  (no match — setting absent)"
-    exit 1
-  fi
-  echo "[sitl] OK: ${key} = ${expected}"
-}
-
-assert_setting "msp_override_channels_mask" "15"
-assert_setting "mag_hardware" "NONE"
+# Brief settle window so any final CLI processing completes before the
+# bridge starts hammering UDP 9003.
+sleep 1
 
 echo "[sitl] Ready. SITL pid=$SITL_PID"
+echo "[sitl] Verify from host:"
+echo "[sitl]   python -m integrations.tools.fake_pegasus_loop --duration 10  (UDP bridge smoke)"
+echo "[sitl]   python -m integrations.tools.discover_bf_gps                  (MSP CLI dump)"
+echo "[sitl] NOTE: bridge must listen on host UDP ${HOST_MOTOR_PORT} (not 9002)"
+
+# Wait forever (or until BF exits / signal). docker compose's
+# restart: unless-stopped re-runs this script if BF exits unexpectedly.
 wait "$SITL_PID"

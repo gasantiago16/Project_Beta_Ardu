@@ -1,30 +1,13 @@
-# Betaflight SITL config defaults for Project_Beta_Ardu.
-# Applied automatically by start.sh on container boot. If apply fails,
-# paste these lines into the Configurator CLI tab against the SITL.
+# Minimum BF SITL config for Project_Beta_Ardu sim testing.
+# Each setting here MUST be valid in BF 4.5.1 — the build pin in the
+# Dockerfile. If you bump BETAFLIGHT_REF, re-run start.sh and audit the
+# stderr for INVALID NAME / INVALID VALUE messages, then update.
+#
+# Why so short: previous versions of this file shipped a comprehensive
+# Phase 0 GPS Rescue config block. BF 4.5.1 renamed half those settings
+# and removed the others, AND something in the larger block segfaulted
+# the BF SITL binary during `save`. Build back up to a richer config one
+# verified-working line at a time.
 
-# Phase 0 — GPS Rescue
-# Note: BF 4.5.1 renamed several gps_rescue_* parameters from earlier
-# documentation. The lines below are the 4.5.1-valid subset; older names
-# (gps_rescue_landing_alt, gps_rescue_throttle_hover, gps_rescue_min_dth)
-# are accepted as INVALID NAME by 4.5.1's CLI and skipped. If you bump
-# BETAFLIGHT_REF, re-run `discover_bf_gps` and audit the dump for warnings.
-set failsafe_procedure = GPS_RESCUE
-set failsafe_delay = 4
-set failsafe_off_delay = 10
-set gps_provider = UBLOX
-set gps_rescue_min_sats = 8
-set gps_rescue_alt_mode = MAX_ALT
-set gps_rescue_initial_climb = 10
-set gps_rescue_descent_dist = 20
-set mag_hardware = NONE
-
-# Phase 1 — MSP override
 set msp_override_channels_mask = 15
-
-# Sim-only: ANGLE mode mapped to AUX1 over its full range so any centered-
-# RC source (radio_to_bf, default mission RC, or BF's own failsafe baseline)
-# keeps the FC in ANGLE the entire mission. Real-flight builds bind ANGLE
-# to a 3-pos switch; this default is safe for sim only.
-aux 0 0 0 900 2100
-
-save
+set mag_hardware = NONE

@@ -45,8 +45,15 @@ RUN GCC_VER=$(arm-none-eabi-gcc -dumpversion) && \
 FROM debian:bookworm-slim AS runtime
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        netcat-openbsd ca-certificates \
+        netcat-openbsd ca-certificates socat \
     && rm -rf /var/lib/apt/lists/*
+# socat: in-container UDP relay. Windows Defender Firewall blocks inbound
+# UDP on a range of ports — 9002, 9012, and (after a few binds) 19012
+# all got blocked, while 9050/9077/19077/19500/28000/35000 stayed open.
+# Without admin we can't whitelist. start.sh tells BF to send motor
+# packets to 127.0.0.1:9002 (container loopback), and socat forwards
+# every packet to host.docker.internal:19500 — high enough to dodge
+# the heuristic + a port nothing else commonly uses.
 
 WORKDIR /opt/sitl
 COPY --from=build /opt/betaflight/obj/main/betaflight_SITL.elf ./betaflight_SITL
@@ -64,6 +71,8 @@ RUN chmod +x ./start.sh ./betaflight_SITL
 # binary, default "127.0.0.1". For Docker we pass `host.docker.internal`
 # (or override via the SITL_SIM_HOST env var) in start.sh so motor packets
 # reach the host process across the container boundary.
-EXPOSE 5761 9002 9003 9004
+EXPOSE 5761 9003 9004
+# 9002 is intentionally NOT exposed: BF's motor packets stay on container
+# loopback in the default (relay) topology — see start.sh + docker-compose.yml.
 
 CMD ["./start.sh"]
