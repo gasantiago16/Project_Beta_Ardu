@@ -95,6 +95,14 @@ parser.add_argument(
     help="Path to Project_Beta_Ardu/integrations (where pegasus_betaflight_backend.py lives).",
 )
 parser.add_argument(
+    "--airframe", default="iris",
+    choices=["iris", "racer5"],
+    help="Which airframe profile to use. `iris` (default) = Pegasus default, "
+         "F450-class slow heavy quad — use to validate the bridge. "
+         "`racer5` = 5\" FPV race quad — requires `assets/racer_5in/racer_5in.usd` "
+         "to be generated first (see assets/racer_5in/README.md).",
+)
+parser.add_argument(
     "--stats-interval-s", type=float, default=5.0,
     help="Seconds between bridge stats prints. 0 disables.",
 )
@@ -154,16 +162,35 @@ _preflight_or_die()
 
 # Make integrations/ importable.
 sys.path.insert(0, args.integrations_dir)
+# Also expose the Project_Beta_Ardu repo root so we can import
+# `integrations.configs.airframes` as a proper package path.
+sys.path.insert(0, str(Path(args.integrations_dir).parent))
 # Bridge-side smoke import: catch ImportError BEFORE Isaac warm-up.
 try:
     from pegasus_betaflight_backend import (  # noqa: E402
         BetaflightBackendConfig,
         BetaflightUdpBackend,
     )
+    from integrations.configs.airframes import (  # noqa: E402
+        USD_PEGASUS_DEFAULT, get_profile, resolve_usd_path,
+    )
 except ImportError as e:
     print(
         f"[final_world_betaflight] FATAL: cannot import bridge from "
         f"{args.integrations_dir}: {e}",
+        file=sys.stderr,
+    )
+    sys.exit(2)
+
+profile = get_profile(args.airframe)
+print(f"[final_world_betaflight] Airframe: {profile.name} "
+      f"({profile.description})", flush=True)
+# Resolve race-quad USD existence pre-Isaac so failure surfaces in <1s.
+if profile.usd_path != USD_PEGASUS_DEFAULT and not os.path.exists(profile.usd_path):
+    print(
+        f"[final_world_betaflight] FATAL: airframe USD not found at "
+        f"{profile.usd_path}.\n"
+        f"  Generate it from the URDF — see assets/racer_5in/README.md.",
         file=sys.stderr,
     )
     sys.exit(2)
@@ -187,6 +214,9 @@ from pegasus.simulator.logic.vehicles.multirotor import (  # noqa: E402
 )
 from pegasus.simulator.logic.interface.pegasus_interface import (  # noqa: E402
     PegasusInterface,
+)
+from pegasus.simulator.logic.thrusters.quadratic_thrust_curve import (  # noqa: E402
+    QuadraticThrustCurve,
 )
 
 
@@ -213,16 +243,42 @@ def main() -> int:
     UsdGeom.Xformable(light.GetPrim()).AddRotateXYZOp().Set(Gf.Vec3f(-45, 30, 0))
 
     # Build the BF bridge. Defaults match BF source: PORT_STATE=9003 (FDM in,
-    # we send), PORT_PWM=9002 (motor out, we receive). Iris max ω = 1023 rad/s.
-    bf_cfg = BetaflightBackendConfig(bf_host=args.bf_host)
+    # we send), PORT_PWM=9002 (motor out, we receive). rotor_max_omega is
+    # per-airframe (Iris ≈ 1023, race-quad ≈ 3000).
+    bf_cfg = BetaflightBackendConfig(
+        bf_host=args.bf_host,
+        rotor_max_omega=profile.rotor_max_omega,
+        num_rotors=profile.num_rotors,
+    )
     bf_backend = BetaflightUdpBackend(bf_cfg)
 
-    # Spawn Iris with the BF bridge as its only backend.
+    # Resolve which USD to load. Iris uses Pegasus's bundled path; race-quad
+    # profiles point at our repo's assets/.
+    usd_path = resolve_usd_path(profile, ROBOTS["Iris"])
+    print(f"[final_world_betaflight] Loading airframe USD: {usd_path}", flush=True)
+
+    # Plumb per-airframe thrust coefficients into Pegasus's force model.
+    # WITHOUT this, only the USD changes when --airframe is swapped — the
+    # thrust curve falls back to Iris-tuned defaults, which combined with
+    # a race-quad's lower mass yields T:W ≈ 50 and instant divergence.
+    n = profile.num_rotors
+    thrust_curve = QuadraticThrustCurve(config={
+        "num_rotors": n,
+        "rotor_constant": [profile.thrust_coeff] * n,
+        "rolling_moment_coefficient": [profile.torque_coeff] * n,
+        "min_rotor_velocity": [0.0] * n,
+        "max_rotor_velocity": [profile.rotor_max_omega] * n,
+    })
+    print(f"[final_world_betaflight] Thrust curve: c_T={profile.thrust_coeff:.2e} "
+          f"c_Q={profile.torque_coeff:.2e} ω_max={profile.rotor_max_omega:.0f} rad/s",
+          flush=True)
+
     config = MultirotorConfig()
+    config.thrust_curve = thrust_curve
     config.backends = [bf_backend]
     Multirotor(
         "/World/quadrotor",
-        ROBOTS["Iris"],
+        usd_path,
         0,
         list(args.spawn),
         [0.0, 0.0, 0.0, 1.0],

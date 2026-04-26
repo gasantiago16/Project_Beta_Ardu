@@ -1,0 +1,169 @@
+<?xml version="1.0"?>
+<!--
+  5-inch FPV race-quad URDF for Project_Beta_Ardu sim testing.
+
+  Adapted from MathWorks F450 / Bullet sample / Pegasus Iris geometry,
+  scaled to 5" race-quad parameters. Goal: realistic flight envelope
+  (T:W ~7, ~500 g AUW, race-quad rates) — NOT realistic visual fidelity.
+
+  Reference physical build (typical 5" 6S):
+    - 5"   tri-blade props (5×4.3)
+    - 2306 motors @ 1700-2300 KV
+    - 6S 1300 mAh LiPo
+    - F7 FC, 30A 4-in-1 ESC, ~500 g AUW
+
+  Inertia tensors are scaled from F450 by mass + dimension ratios. The
+  motor/prop dynamics (thrust + torque coefficients, time constant) are
+  applied by Pegasus's QuadraticThrustCurve in `airframes.py`, NOT
+  baked into this URDF.
+
+  Geometry frame: base_link is FLU (Forward-Left-Up) — Pegasus convention.
+  Rotors are X-config: motors at (±0.0884, ±0.0884, 0) relative to body
+  center, where 0.0884 m = arm_length × cos(45°) for a 0.125 m arm.
+
+  Conversion to USD: Isaac Sim's `omni.importer.urdf` extension. See
+  `assets/racer_5in/README.md` for the one-time conversion procedure.
+-->
+<robot name="racer_5in">
+
+  <!-- ============================================================== -->
+  <!-- Base body — 420 g (rotors add 4 × 20 g = 80 g → AUW = 500 g).   -->
+  <!-- I_xx = I_yy = 0.0023, I_zz = 0.004 kg·m² — scaled from public   -->
+  <!-- 5" race-quad benchmarks (RotorPy preset, Bouabdallah refs).     -->
+  <!-- The earlier 0.005/0.008 over-damped angular response — race     -->
+  <!-- rates wouldn't actually look like race rates in sim.            -->
+  <!-- ============================================================== -->
+  <link name="base_link">
+    <inertial>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <mass value="0.420"/>
+      <inertia
+        ixx="0.0023" ixy="0.0"    ixz="0.0"
+                     iyy="0.0023" iyz="0.0"
+                                  izz="0.004"/>
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.14 0.12 0.035"/>
+      </geometry>
+      <material name="frame_carbon">
+        <color rgba="0.1 0.1 0.1 1.0"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.14 0.12 0.035"/>
+      </geometry>
+    </collision>
+  </link>
+
+  <!-- ============================================================== -->
+  <!-- Rotor visual + collision parameters (shared)                    -->
+  <!-- 5" prop ≈ 0.127 m diameter, ~3 mm thick                         -->
+  <!-- Motor inertia tiny vs body (treat as 5 g point mass)            -->
+  <!-- ============================================================== -->
+
+  <!-- rotor0: front-right (X-config, +x +y_negative_left = -y FLU)    -->
+  <!-- Pegasus FLU: +x forward, +y left. Front-right is +x, -y.        -->
+  <link name="rotor0">
+    <inertial>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <mass value="0.020"/>
+      <inertia ixx="1.0e-5" ixy="0" ixz="0"
+                            iyy="1.0e-5" iyz="0"
+                                         izz="2.0e-5"/>
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <cylinder length="0.005" radius="0.0635"/>
+      </geometry>
+      <material name="rotor_blue">
+        <color rgba="0.2 0.4 0.9 0.6"/>
+      </material>
+    </visual>
+  </link>
+  <joint name="joint0" type="continuous">
+    <parent link="base_link"/>
+    <child link="rotor0"/>
+    <origin xyz="0.0884 -0.0884 0.025" rpy="0 0 0"/>
+    <axis xyz="0 0 1"/>
+  </joint>
+
+  <!-- rotor1: rear-left (-x +y FLU)                                   -->
+  <link name="rotor1">
+    <inertial>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <mass value="0.020"/>
+      <inertia ixx="1.0e-5" ixy="0" ixz="0"
+                            iyy="1.0e-5" iyz="0"
+                                         izz="2.0e-5"/>
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <cylinder length="0.005" radius="0.0635"/>
+      </geometry>
+      <material name="rotor_blue"/>
+    </visual>
+  </link>
+  <joint name="joint1" type="continuous">
+    <parent link="base_link"/>
+    <child link="rotor1"/>
+    <origin xyz="-0.0884 0.0884 0.025" rpy="0 0 0"/>
+    <axis xyz="0 0 1"/>
+  </joint>
+
+  <!-- rotor2: front-left (+x +y FLU)                                  -->
+  <link name="rotor2">
+    <inertial>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <mass value="0.020"/>
+      <inertia ixx="1.0e-5" ixy="0" ixz="0"
+                            iyy="1.0e-5" iyz="0"
+                                         izz="2.0e-5"/>
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <cylinder length="0.005" radius="0.0635"/>
+      </geometry>
+      <material name="rotor_red">
+        <color rgba="0.9 0.2 0.2 0.6"/>
+      </material>
+    </visual>
+  </link>
+  <joint name="joint2" type="continuous">
+    <parent link="base_link"/>
+    <child link="rotor2"/>
+    <origin xyz="0.0884 0.0884 0.025" rpy="0 0 0"/>
+    <axis xyz="0 0 1"/>
+  </joint>
+
+  <!-- rotor3: rear-right (-x -y FLU)                                  -->
+  <link name="rotor3">
+    <inertial>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <mass value="0.020"/>
+      <inertia ixx="1.0e-5" ixy="0" ixz="0"
+                            iyy="1.0e-5" iyz="0"
+                                         izz="2.0e-5"/>
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <cylinder length="0.005" radius="0.0635"/>
+      </geometry>
+      <material name="rotor_red"/>
+    </visual>
+  </link>
+  <joint name="joint3" type="continuous">
+    <parent link="base_link"/>
+    <child link="rotor3"/>
+    <origin xyz="-0.0884 -0.0884 0.025" rpy="0 0 0"/>
+    <axis xyz="0 0 1"/>
+  </joint>
+
+</robot>
