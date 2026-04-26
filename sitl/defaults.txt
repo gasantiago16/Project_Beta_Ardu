@@ -11,3 +11,14 @@
 
 set msp_override_channels_mask = 15
 set mag_hardware = NONE
+# Without a motor protocol BF refuses to arm with MOTOR_PROTO flag.
+# PWM works in SITL where DSHOT/proshot don't (no real motor h/w).
+set motor_pwm_protocol = PWM
+# Disable a few real-flight pre-arm checks that don't apply in sim:
+# no real RX (we use MSP override), no calibration data, no fail-safe
+# RC stream. Without these BF gates arming on RXLOSS forever.
+set small_angle = 180
+set min_check = 1000
+set max_check = 2000
+# Skip the gyro calibration delay so arming is immediate.
+set runaway_takeoff_prevention = OFF

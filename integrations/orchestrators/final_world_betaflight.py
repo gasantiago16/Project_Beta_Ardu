@@ -131,7 +131,30 @@ parser.add_argument(
     "--stats-interval-s", type=float, default=5.0,
     help="Seconds between bridge stats prints. 0 disables.",
 )
+parser.add_argument(
+    "--motor-port", type=int, default=0,
+    help="Host UDP port the bridge listens on for BF motor packets. 0 = "
+         "pick a fresh ephemeral high port (Windows Defender Firewall has "
+         "been observed to silently block long-lived UDP ports on this "
+         "machine; rotating each run sidesteps the heuristic). Whatever "
+         "we pick is then pushed into the SITL container via "
+         "SITL_HOST_MOTOR_PORT and the relay is restarted.",
+)
 args = parser.parse_args()
+
+
+def _pick_motor_port() -> int:
+    """Bind ephemeral UDP, get the assigned port, close the socket.
+    The kernel picks a high-port-range slot we haven't used recently —
+    much less likely to be in any Defender Firewall blocklist than a
+    well-known port we've been re-binding for an hour."""
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.bind(("", 0))
+        port = s.getsockname()[1]
+        return port
+    finally:
+        s.close()
 
 
 def _preflight_or_die() -> None:
@@ -202,6 +225,45 @@ def _validate_paths_or_die() -> None:
 _resolve_spawn_or_die()
 _validate_paths_or_die()
 _preflight_or_die()
+
+# Pick the host motor port BEFORE Isaac warmup so we can re-launch the
+# container's relay with the right target port if needed.
+if args.motor_port == 0:
+    args.motor_port = _pick_motor_port()
+    print(
+        f"[final_world_betaflight] Picked ephemeral host motor port: {args.motor_port}",
+        flush=True,
+    )
+    # Reconfigure the SITL container's relay to forward to this port.
+    # Uses `docker exec` to kill the existing relay and start a fresh
+    # one — avoids a full container restart (~5 s vs ~30 s).
+    try:
+        import subprocess
+        subprocess.run(
+            ["docker", "exec", "project-beta-ardu-sitl", "bash", "-c",
+             f"pkill -f motor_relay.py; sleep 0.3; "
+             f"python3 /opt/sitl/motor_relay.py 192.168.65.254 {args.motor_port} >/dev/null 2>&1 &"],
+            check=False, timeout=5,
+        )
+        print(
+            f"[final_world_betaflight] Restarted in-container relay -> "
+            f"192.168.65.254:{args.motor_port}",
+            flush=True,
+        )
+        time.sleep(0.5)  # let the new relay bind before we send FDM
+    except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+        print(
+            f"[final_world_betaflight] WARN: could not auto-reconfigure "
+            f"relay: {e}. Manually set SITL_HOST_MOTOR_PORT={args.motor_port}"
+            f" + restart container.",
+            file=sys.stderr,
+        )
+else:
+    print(
+        f"[final_world_betaflight] Using fixed motor port: {args.motor_port} "
+        f"(must match SITL container's SITL_HOST_MOTOR_PORT env)",
+        flush=True,
+    )
 
 # Make integrations/ importable.
 sys.path.insert(0, args.integrations_dir)
@@ -296,16 +358,18 @@ def main() -> int:
     # (in-container socat relay target — BF's hardcoded 9002 stays on
     # container loopback because Windows Defender Firewall blocks 9002).
     # rotor_max_omega is per-airframe (Iris ≈ 1023, race-quad ≈ 3000).
-    # `recv_timeout_s=0.05` (50 ms): the bridge first non-blocking-drains
-    # any queued motor packets, then blocks at most this long for the
-    # first one. 50 ms covers BF main-loop latency + container→host UDP
-    # path, while still letting the Pegasus physics loop tick at 20 Hz
-    # worst-case (i.e. when BF goes silent — held-last-command).
+    # `recv_timeout_s=2.0` is used ONLY for the cold-start sync: the
+    # bridge blocks on the very first tick until BF replies, then
+    # switches to drain-only forever after. Pegasus's physics loop
+    # runs at full rate, motor packets are consumed as they appear,
+    # hold-last-command between. This is the right pattern for a real
+    # flight controller: latency tolerance over hard lockstep.
     bf_cfg = BetaflightBackendConfig(
         bf_host=args.bf_host,
+        motor_port=args.motor_port,
         rotor_max_omega=profile.rotor_max_omega,
         num_rotors=profile.num_rotors,
-        recv_timeout_s=0.05,
+        recv_timeout_s=2.0,
     )
     bf_backend = BetaflightUdpBackend(bf_cfg)
 

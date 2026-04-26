@@ -55,8 +55,10 @@ from __future__ import annotations
 
 import logging
 import math
+import select
 import socket
 import struct
+import threading
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -117,8 +119,11 @@ class BetaflightBackendConfig:
     rotor_max_omega: float = 1023.0
     num_rotors: int = 4
 
-    # Lockstep recv timeout. >>> physics_dt so we wait a few ticks before
-    # giving up; small enough that a real failure still surfaces fast.
+    # Lockstep recv timeout. Used ONLY on the very first update() before
+    # any motor packet has arrived (cold-start synchronization). Once we
+    # have rx >= 1 we switch to drain-only mode and never block, so the
+    # physics loop can run at full Pegasus rate even when BF emits motors
+    # less often than we send FDM.
     recv_timeout_s: float = 1.0
 
     # Reference altitude (sea-level barometric pressure source). Pegasus
@@ -279,6 +284,15 @@ class BetaflightUdpBackend:
         # RNG for noise. Re-seeded from config in start(); fallback in
         # __init__ so _pack_fdm can be unit-tested without going through start().
         self._rng = np.random.default_rng(0)
+        # Background recv thread + lock-protected latest motor buffer.
+        # Pegasus's physics loop calls update() in tight bursts; a sync
+        # recv on every step blocks the loop and we lose packets at low
+        # rates. The thread does a blocking recvfrom in a loop so every
+        # packet that hits the kernel is picked up immediately, regardless
+        # of physics rate. update() just reads the latest cached motor.
+        self._rx_thread: Optional[threading.Thread] = None
+        self._rx_lock = threading.Lock()
+        self._rx_stop = threading.Event()
 
     # ── Pegasus Backend interface ───────────────────────────────────────
 
@@ -291,6 +305,14 @@ class BetaflightUdpBackend:
             return
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        # Boost the kernel recv buffer. Default is small (~8 KiB on
+        # Windows) which causes silent drops when motor packets arrive
+        # faster than the bridge drains them. 1 MiB holds ~64k servo
+        # packets — plenty of headroom for any conceivable burst.
+        try:
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1024 * 1024)
+        except OSError as e:
+            log.debug("SO_RCVBUF bump rejected: %s", e)
         # Bind to the well-known motor_port so BF SITL's auto-reply (or any
         # configured destination matching this port) reaches us.
         s.bind(("", self.config.motor_port))
@@ -315,18 +337,57 @@ class BetaflightUdpBackend:
         self._packets_tx = 0
         self._gyro_bias = np.array([self.config.gyro_bias_drift_rad_s] * 3)
         self._rng = np.random.default_rng(self.config.noise_seed)
+        # Spin up the recv thread. settimeout > 0 so it can periodically
+        # check the stop flag during shutdown.
+        self._rx_stop.clear()
+        self._rx_thread = threading.Thread(
+            target=self._rx_loop, name="bf-bridge-rx", daemon=True,
+        )
+        self._rx_thread.start()
         log.info(
             "BetaflightUdpBackend started: bind 0.0.0.0:%d, send→%s:%d",
             self.config.motor_port, self.config.bf_host, self.config.fdm_port,
         )
 
+    def _rx_loop(self) -> None:
+        """Background recv: pull every motor packet the moment it arrives,
+        update _latest_motor under the lock. This decouples motor RX from
+        whatever rate Pegasus's physics loop happens to be running at."""
+        # Use a short blocking timeout so the thread checks _rx_stop
+        # roughly every 100 ms — fast enough for clean shutdown.
+        sock = self._sock
+        try:
+            sock.settimeout(0.1)
+        except OSError:
+            return
+        while not self._rx_stop.is_set():
+            try:
+                buf, _addr = sock.recvfrom(64)
+            except socket.timeout:
+                continue
+            except (ConnectionResetError, OSError):
+                # Windows ICMP-unreachable spurious wakes; ignore.
+                continue
+            if len(buf) < _MOTOR_STRUCT.size:
+                continue
+            motors = _MOTOR_STRUCT.unpack_from(buf, 0)
+            with self._rx_lock:
+                self._latest_motor = motors
+                self._packets_rx += 1
+
     def stop(self) -> None:
+        # Tell the recv thread to bail, close the socket so the blocking
+        # recvfrom returns immediately, then join.
+        self._rx_stop.set()
         if self._sock is not None:
             try:
                 self._sock.close()
             except OSError:
                 pass
             self._sock = None
+        if self._rx_thread is not None:
+            self._rx_thread.join(timeout=1.0)
+            self._rx_thread = None
         log.info(
             "BetaflightUdpBackend stopped: tx=%d rx=%d timeouts=%d",
             self._packets_tx, self._packets_rx, self._timeouts,
@@ -362,19 +423,9 @@ class BetaflightUdpBackend:
         return
 
     def update(self, dt: float) -> None:
-        """Send FDM packet, drain pending motor packets, cache the latest.
-
-        We DON'T block waiting for a motor reply on every step — BF SITL
-        only emits motors at its main-loop rate, which is roughly half the
-        FDM rate (verified against 4.5.1 with disarmed FC). A blocking
-        recv would stall the Pegasus physics loop on every "off" step.
-        Instead: send FDM, then drain whatever motor packets are sitting
-        on the socket (typically 0 or 1), use the freshest, hold-last-
-        command otherwise. This decouples physics tick rate from the
-        relay's per-packet jitter.
-        """
+        """Send FDM packet. Motor RX happens asynchronously in the recv
+        thread (see _rx_loop); update() is purely the TX half."""
         if self._sock is None or self._latest_state is None:
-            # No state yet (very first tick of cold start) or socket closed.
             return
         self._sim_time += dt
         try:
@@ -384,65 +435,17 @@ class BetaflightUdpBackend:
         except OSError as e:
             log.warning("FDM send failed: %s", e)
             return
-        # Drain all pending motor packets non-blocking, keep the latest.
-        # If nothing's pending, fall back to ONE blocking recv with the
-        # configured timeout (covers the cold-start case where BF hasn't
-        # replied yet to the very first FDM). Steady-state: BF emits ~1
-        # motor per FDM and the non-blocking drain takes it instantly.
-        drained = 0
-        latest_buf = None
-        last_oserror = None
-        try:
-            self._sock.setblocking(False)
-            while True:
-                buf, _addr = self._sock.recvfrom(64)
-                if len(buf) >= _MOTOR_STRUCT.size:
-                    latest_buf = buf
-                    drained += 1
-        except (BlockingIOError, socket.timeout):
-            pass
-        except ConnectionResetError:
-            pass
-        except OSError as e:
-            last_oserror = e
-        finally:
-            self._sock.settimeout(self.config.recv_timeout_s)
-        if last_oserror is not None and self._packets_tx % 200 == 0:
-            log.warning("drain recvfrom OSError: %s", last_oserror)
-        if latest_buf is None:
-            # Nothing was ready — wait one timeout window for the first
-            # packet to arrive (or give up and hold last command).
-            try:
-                buf, _addr = self._sock.recvfrom(64)
-                if len(buf) >= _MOTOR_STRUCT.size:
-                    latest_buf = buf
-                    drained = 1
-            except socket.timeout:
-                pass
-            except ConnectionResetError:
-                pass
-            except OSError as e:
-                log.warning("recvfrom OSError: %s", e)
-        if latest_buf is not None:
-            self._latest_motor = _MOTOR_STRUCT.unpack_from(latest_buf, 0)
-            self._packets_rx += drained
-        else:
-            # Held last motor command. NEVER zero out — would crash a
-            # hovering quad on a single dropped packet.
-            self._timeouts += 1
-            if self._timeouts == 50:
-                log.warning("BF SITL motor packet timeout #50 - check container")
 
     def input_reference(self) -> list[float]:
-        """Return the most recently received rotor ω (rad/s). Called inside
-        `Multirotor.update` (multirotor.py:113) BEFORE the per-tick
-        backend.update(dt). On the very first tick — or any time `start()`
-        hasn't run yet — return zeros; the alternative is to gamble on
-        `_latest_motor` being a sane init value."""
+        """Return the most recently received rotor ω (rad/s). The recv
+        thread updates `_latest_motor` asynchronously; we read under the
+        lock so we get a consistent 4-tuple snapshot."""
         if self._sock is None:
             return [0.0] * self.config.num_rotors
         scale = self.config.rotor_max_omega
-        return [m * scale for m in self._latest_motor]
+        with self._rx_lock:
+            motors = self._latest_motor
+        return [m * scale for m in motors]
 
     def stats(self) -> dict:
         """Telemetry counters for orchestrator-side health logging. Returns

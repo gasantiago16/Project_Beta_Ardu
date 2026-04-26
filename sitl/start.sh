@@ -98,19 +98,23 @@ if ! nc -z localhost 5761; then
   exit 1
 fi
 
-# Apply defaults.txt over CLI TCP. Three BF SITL gotchas we hit the hard way:
+# Apply defaults.txt over CLI TCP, then `save`. BF's `save` writes
+# eeprom.bin and triggers systemReset() → exit(0). The container's
+# ephemeral filesystem keeps eeprom.bin so the second BF spawn loads
+# it on boot — that's how we leave CLI cleanly without losing config.
+# (Just dropping the TCP connection without `save` leaves BF in CLI
+# mode, which sets the CLI arming-disable flag and prevents flight.)
+#
+# CLI gotchas we hit the hard way:
 #   1. CLI mode entry is triggered by `#` as the FIRST byte of a line.
-#      Our defaults.txt starts with `# Minimum BF SITL config…` — BF reads
-#      the `#`, enters CLI, then tries to execute the rest of that line
-#      as a command, which fails. Fix: prepend `\n#\n` for a clean entry.
+#      defaults.txt starts with `# Minimum…` — BF reads the `#`, enters
+#      CLI, then tries to execute the rest of that line as a command,
+#      which fails. Fix: prepend `\n#\n` for a clean entry.
 #   2. Sending all lines in one TCP write blasts BF's CLI parser; only
 #      the first 1-2 commands actually get processed before the rest is
 #      silently dropped. Fix: drip lines with 50 ms sleep between them.
-#   3. NEVER send `save` (see top-of-file comment). Use `exit` to leave
-#      CLI mode without resetting; the in-memory `set` values stay live
-#      for the rest of the process lifetime.
-if [ -f defaults.txt ]; then
-  echo "[sitl] Applying defaults.txt (in-memory only, no save)..."
+if [ -f defaults.txt ] && [ ! -f .config_applied ]; then
+  echo "[sitl] Applying defaults.txt + save (BF will exit/reboot after save)..."
   {
     printf '\n#\n'
     sleep 0.5
@@ -118,14 +122,35 @@ if [ -f defaults.txt ]; then
       printf '%s\n' "$line"
       sleep 0.05
     done < defaults.txt
-    # No `save` — would exit BF. Drop the connection instead; the CLI
-    # mode persists until BF reaches its idle loop, which is fine for us.
-    sleep 0.5
-  } | nc -q 1 localhost 5761 || true
+    printf 'save\n'
+    sleep 1.5
+  } | nc -q 3 localhost 5761 || true
+
+  echo "[sitl] Phase 1: waiting for BF to exit after save..."
+  wait "$SITL_PID" 2>/dev/null || true
+  SITL_PID=
+  sleep 1   # let TCP/UDP ports clear
+
+  # Marker so we don't re-apply on every container restart (BF creates a
+  # default eeprom.bin on first boot before we save, so eeprom existence
+  # alone isn't a useful signal).
+  touch .config_applied
+
+  echo "[sitl] Phase 2: relaunch BF with saved eeprom (clean, no CLI)"
+  ./betaflight_SITL "${BF_SIM_ARG}" &
+  SITL_PID=$!
+  echo "[sitl] Phase 2 BF spawned (pid=$SITL_PID); waiting for MSP..."
+  for i in $(seq 1 30); do
+    if nc -z localhost 5761; then
+      echo "[sitl] Phase 2 MSP up after ${i}s"
+      break
+    fi
+    sleep 1
+  done
+elif [ -f .config_applied ]; then
+  echo "[sitl] .config_applied marker present — skipping defaults.txt apply"
 fi
 
-# Brief settle window so any final CLI processing completes before the
-# bridge starts hammering UDP 9003.
 sleep 1
 
 echo "[sitl] Ready. SITL pid=$SITL_PID"

@@ -400,13 +400,15 @@ class TestBackendLockstep(unittest.TestCase):
             try:
                 be.update_state(hovering_state())
                 be.update(0.004)
+                # Recv runs asynchronously in a background thread. Give it
+                # a moment to pick up fake_bf's reply before reading.
+                time.sleep(0.1)
                 ref = be.input_reference()
                 self.assertEqual(len(ref), 4)
                 self.assertAlmostEqual(ref[0], 100.0, places=2)
                 self.assertAlmostEqual(ref[1], 200.0, places=2)
                 self.assertAlmostEqual(ref[2], 300.0, places=2)
                 self.assertAlmostEqual(ref[3], 400.0, places=2)
-                time.sleep(0.1)
                 self.assertGreaterEqual(fake_bf.received_count, 1)
             finally:
                 be.stop()
@@ -414,6 +416,8 @@ class TestBackendLockstep(unittest.TestCase):
             fake_bf.stop()
 
     def test_recv_timeout_holds_last_command(self):
+        """When no BF is replying, the bridge holds the last cached motor
+        command — never zeros out (which would dump a hovering quad)."""
         fdm_port, motor_port = _free_port_pair()
         cfg = BetaflightBackendConfig(
             bf_host="127.0.0.1",
@@ -424,14 +428,15 @@ class TestBackendLockstep(unittest.TestCase):
         be = BetaflightUdpBackend(cfg)
         be.start()
         try:
-            be._latest_motor = (0.5, 0.5, 0.5, 0.5)
+            with be._rx_lock:
+                be._latest_motor = (0.5, 0.5, 0.5, 0.5)
             be.update_state(hovering_state())
-            be.update(0.004)  # No fake BF → should time out (or hit
-                              # ConnectionResetError on Windows — both held).
+            be.update(0.004)  # No fake BF → recv thread sees nothing,
+                              # last_motor stays at the seeded value.
+            time.sleep(0.1)
             ref = be.input_reference()
             for v in ref:
                 self.assertAlmostEqual(v, 0.5 * cfg.rotor_max_omega, places=2)
-            self.assertEqual(be._timeouts, 1)
         finally:
             be.stop()
 
