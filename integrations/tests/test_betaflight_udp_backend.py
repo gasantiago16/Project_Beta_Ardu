@@ -441,14 +441,45 @@ class TestBackendLockstep(unittest.TestCase):
 
     def test_motor_saturation_bounds(self):
         # Motor packet of (0.0, 1.0) bounds; verify input_reference scales correctly.
-        cfg = BetaflightBackendConfig(rotor_max_omega=1000.0)
+        # Backend must be started so input_reference() returns the cached
+        # values rather than the defensive-zero fallback.
+        fdm_port, motor_port = _free_port_pair()
+        cfg = BetaflightBackendConfig(
+            fdm_port=fdm_port, motor_port=motor_port, rotor_max_omega=1000.0,
+        )
         be = BetaflightUdpBackend(cfg)
-        be._latest_motor = (0.0, 1.0, 0.5, 0.25)
-        ref = be.input_reference()
-        self.assertEqual(ref[0], 0.0)
-        self.assertEqual(ref[1], 1000.0)
-        self.assertEqual(ref[2], 500.0)
-        self.assertEqual(ref[3], 250.0)
+        be.start()
+        try:
+            be._latest_motor = (0.0, 1.0, 0.5, 0.25)
+            ref = be.input_reference()
+            self.assertEqual(ref[0], 0.0)
+            self.assertEqual(ref[1], 1000.0)
+            self.assertEqual(ref[2], 500.0)
+            self.assertEqual(ref[3], 250.0)
+        finally:
+            be.stop()
+
+    def test_input_reference_zero_when_not_started(self):
+        # Defensive-zero contract: `input_reference()` must NOT crash and
+        # MUST return zeros if `start()` hasn't run, even if `_latest_motor`
+        # somehow holds non-zero values. Protects against an upgrade path
+        # where Pegasus calls input_reference before the timeline-play
+        # backend.start() callback fires.
+        cfg = BetaflightBackendConfig(num_rotors=4)
+        be = BetaflightUdpBackend(cfg)
+        be._latest_motor = (0.7, 0.7, 0.7, 0.7)  # would be ~700 rad/s if scaled
+        self.assertEqual(be.input_reference(), [0.0, 0.0, 0.0, 0.0])
+
+    def test_stats_shape(self):
+        cfg = BetaflightBackendConfig()
+        be = BetaflightUdpBackend(cfg)
+        s = be.stats()
+        self.assertEqual(s["tx"], 0)
+        self.assertEqual(s["rx"], 0)
+        self.assertEqual(s["timeouts"], 0)
+        self.assertEqual(s["sim_time_s"], 0.0)
+        # Stats must be cheap and side-effect-free.
+        self.assertEqual(be.stats(), s)
 
 
 # ── Integration: real BF SITL Docker container ─────────────────────────────

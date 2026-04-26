@@ -36,11 +36,20 @@ The simulator_ip defaults to "127.0.0.1" but is overridable via argv[1] to
 the betaflight_SITL binary. **For Docker on Win/Mac, sitl/start.sh passes
 `host.docker.internal` so motor packets reach the host bridge process.**
 
-Lockstep ordering (per Pegasus multirotor.py:113-141 — `input_reference()`
-runs BEFORE `update(dt)`): in `update(dt)` we send FDM to (bf_host, 9003),
-then blocking-recv motor on the local 9002 socket, cache the result.
-`input_reference()` returns the cached values scaled to rad/s. First tick
-runs before any motor packet — `start()` seeds the cache with zeros.
+Lifecycle ordering: Pegasus dispatches three independent physics-step
+callbacks per tick (registered in `vehicle.py`):
+  1. `/state`         → updates internal rigid-body pose (no backend call)
+  2. `/update`        → `Multirotor.update(dt)` calls
+                          backend.input_reference()  (read cached motor)
+                          (forces applied)
+                          backend.update(dt)         (send FDM, recv motor)
+  3. `/mav_state`     → `Vehicle.update_sim_state(dt)` calls
+                          backend.update_state(state)
+The /state and /mav_state callback ordering is not strictly synchronized,
+so `_latest_state` consumed by `update(dt)` may be from the prior physics
+tick — a ≤4 ms lag at 250 Hz, well below BF's lockstep tolerance. First
+tick: `_latest_state` is None, so `update(dt)` returns early without
+sending FDM; `input_reference()` returns the zero-seeded motor cache.
 """
 from __future__ import annotations
 
@@ -359,11 +368,25 @@ class BetaflightUdpBackend:
             log.warning("recvfrom OSError: %s", e)
 
     def input_reference(self) -> list[float]:
-        """Return the most recently received rotor ω (rad/s). Called BEFORE
-        `update(dt)` each tick (Pegasus multirotor.py:113), so the first
-        tick returns the start()-seeded zeros."""
+        """Return the most recently received rotor ω (rad/s). Called inside
+        `Multirotor.update` (multirotor.py:113) BEFORE the per-tick
+        backend.update(dt). On the very first tick — or any time `start()`
+        hasn't run yet — return zeros; the alternative is to gamble on
+        `_latest_motor` being a sane init value."""
+        if self._sock is None:
+            return [0.0] * self.config.num_rotors
         scale = self.config.rotor_max_omega
         return [m * scale for m in self._latest_motor]
+
+    def stats(self) -> dict:
+        """Telemetry counters for orchestrator-side health logging. Returns
+        a stable shape so callers don't have to reach into `_*` privates."""
+        return {
+            "tx": self._packets_tx,
+            "rx": self._packets_rx,
+            "timeouts": self._timeouts,
+            "sim_time_s": self._sim_time,
+        }
 
     # ── Internals ───────────────────────────────────────────────────────
 
