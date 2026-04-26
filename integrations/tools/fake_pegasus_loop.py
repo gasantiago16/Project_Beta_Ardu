@@ -14,7 +14,7 @@ What's validated:
 If you see ZERO motor packets, the most likely causes (in order):
 1. BF SITL not running (check `docker compose ps`).
 2. Stale Python listener bound to `--motor-port` blocking delivery
-   (PowerShell: `Get-NetUDPEndpoint | ? LocalPort -eq 19500`; kill it).
+   (PowerShell: `Get-NetUDPEndpoint | ? LocalPort -eq 38500`; kill it).
 3. BF SITL launched with a sim_host argument it can't `inet_addr()` —
    check `[SITL] The SITL will output to IP ...` in `docker logs`.
 4. Windows Defender Firewall blocked the host inbound port (test with
@@ -78,13 +78,13 @@ def main() -> int:
     # BF source `src/main/target/SITL/sitl.c`:
     #   PORT_STATE = 9003 — BF binds + reads FDM (sim → BF)
     #   PORT_PWM   = 9002 — BF sends motor packets (BF → sim)
-    # Motor port default is 19500, NOT BF's 9002 — see backend docstring
+    # Motor port default is 38500, NOT BF's 9002 — see backend docstring
     # for the Windows Defender Firewall block on UDP 9002 + the in-
-    # container socat relay that forwards 9002 → 19500.
+    # container socat relay that forwards 9002 → 38500.
     p.add_argument("--fdm-port", type=int, default=9003,
                    help="Sim → BF UDP port (BF PORT_STATE, default 9003).")
-    p.add_argument("--motor-port", type=int, default=19500,
-                   help="BF → Sim UDP port (relay target, default 19500).")
+    p.add_argument("--motor-port", type=int, default=38500,
+                   help="BF → Sim UDP port (relay target, default 38500).")
     p.add_argument("--alt", type=float, default=5.0)
     p.add_argument("--print-every", type=int, default=125,
                    help="Print sample motor output every N ticks (default 125 = 0.5s).")

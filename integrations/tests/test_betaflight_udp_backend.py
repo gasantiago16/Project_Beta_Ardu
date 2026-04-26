@@ -108,10 +108,10 @@ class TestDefaultPorts(unittest.TestCase):
     def test_default_motor_port_is_relay_target(self):
         # BF source: PORT_PWM = 9002 — BF's hardcoded outbound port.
         # On Windows hosts where Defender Firewall blocks UDP 9002, the
-        # in-container socat relay forwards to host:19500 instead. The
+        # in-container socat relay forwards to host:38500 instead. The
         # default reflects that workflow; Linux/Mac override to 9002 in
         # BetaflightBackendConfig and skip the relay.
-        self.assertEqual(BetaflightBackendConfig().motor_port, 19500)
+        self.assertEqual(BetaflightBackendConfig().motor_port, 38500)
 
 
 # ── Frame conversions ──────────────────────────────────────────────────────

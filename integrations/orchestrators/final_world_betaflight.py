@@ -28,7 +28,7 @@ What this script does:
 3. Spawns an Iris quadrotor at the proven road-junction spawn (40.7, 17.1,
    1.3) — 1 m above the SM_RoadJunction_Plus28 asphalt center.
 4. Attaches a BetaflightUdpBackend (from Project_Beta_Ardu/integrations/)
-   that exchanges fdm_packet (UDP 9003 → BF) and servo_packet (UDP 19500
+   that exchanges fdm_packet (UDP 9003 → BF) and servo_packet (UDP 38500
    ← in-container socat relay forwarding BF's hardcoded 127.0.0.1:9002
    output — see sitl/start.sh for the why) with the BF SITL container.
 5. Periodic stats logging every 5 s so it's visually obvious the lockstep
@@ -61,8 +61,18 @@ import sys
 import time
 from pathlib import Path
 
-import carb
+# Windows console default codec is cp1252, which can't encode the Unicode
+# arrows / em-dashes / Greek letters this script prints. Switch stdout +
+# stderr to UTF-8 before any print() runs so we don't crash on the very
+# first status line.
+for stream in (sys.stdout, sys.stderr):
+    if hasattr(stream, "reconfigure"):
+        stream.reconfigure(encoding="utf-8", errors="replace")
+
 from isaacsim import SimulationApp
+# `carb` and friends are only importable AFTER SimulationApp() boots the
+# Kit/Carb runtime; we defer those imports until after `simulation_app`
+# is constructed below.
 
 # ── CLI args (parse before SimulationApp init per Isaac Sim convention) ────
 
@@ -282,14 +292,20 @@ def main() -> int:
     light.CreateIntensityAttr(2000.0)
     UsdGeom.Xformable(light.GetPrim()).AddRotateXYZOp().Set(Gf.Vec3f(-45, 30, 0))
 
-    # Build the BF bridge. fdm_port=9003 (BF PORT_STATE), motor_port=19500
+    # Build the BF bridge. fdm_port=9003 (BF PORT_STATE), motor_port=38500
     # (in-container socat relay target — BF's hardcoded 9002 stays on
     # container loopback because Windows Defender Firewall blocks 9002).
     # rotor_max_omega is per-airframe (Iris ≈ 1023, race-quad ≈ 3000).
+    # `recv_timeout_s=0.05` (50 ms): the bridge first non-blocking-drains
+    # any queued motor packets, then blocks at most this long for the
+    # first one. 50 ms covers BF main-loop latency + container→host UDP
+    # path, while still letting the Pegasus physics loop tick at 20 Hz
+    # worst-case (i.e. when BF goes silent — held-last-command).
     bf_cfg = BetaflightBackendConfig(
         bf_host=args.bf_host,
         rotor_max_omega=profile.rotor_max_omega,
         num_rotors=profile.num_rotors,
+        recv_timeout_s=0.05,
     )
     bf_backend = BetaflightUdpBackend(bf_cfg)
 

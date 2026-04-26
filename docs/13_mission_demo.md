@@ -48,7 +48,7 @@ $PROJ = "C:\Users\Gabriel Santiago\Project_Beta_Ardu"
 ```
 
 > **Windows pre-flight (T2)**: kill any stale Python listener on UDP
-> 19500 before launching the bridge.
+> 38500 before launching the bridge.
 > `Get-Process python -EA SilentlyContinue | Stop-Process -Force`.
 > Stale listeners with `SO_REUSEADDR` can split-receive motor packets
 > and the bridge will see `rx=0`.
@@ -65,7 +65,7 @@ docker compose -f sitl/docker-compose.yml up
 #   mismatch on a disarmed FC, not a wire bug.
 
 # T2: Pegasus + Iris in Final_World, spawning at SW corner.
-#     Bridge auto-binds host UDP 19500 (relay target) for motor RX.
+#     Bridge auto-binds host UDP 38500 (relay target) for motor RX.
 & $PY "$PROJ\integrations\orchestrators\final_world_betaflight.py" --corner SW
 
 # T3 (optional, for HANDOVER): pilot RC over the Radiomaster Pocket.

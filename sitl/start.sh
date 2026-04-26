@@ -15,7 +15,7 @@
 set -e
 
 RAW_SIM_HOST="${SITL_SIM_HOST:-host.docker.internal}"
-HOST_MOTOR_PORT="${SITL_HOST_MOTOR_PORT:-19500}"
+HOST_MOTOR_PORT="${SITL_HOST_MOTOR_PORT:-38500}"
 USE_RELAY="${SITL_USE_MOTOR_RELAY:-1}"
 
 # BF SITL parses argv[1] with inet_addr() — IPv4-dotted only. On Docker
@@ -61,24 +61,22 @@ trap cleanup EXIT INT TERM
 #   ${HOST_IPV4}:${HOST_MOTOR_PORT}. Why:
 #     - Windows Defender Firewall on the dev host empirically blocks
 #       inbound UDP on a heuristic port range that includes 9002 and
-#       9012, while 9050/9077/19500/28000 stay open. No admin = no
+#       9012, while 9050/9077/38500/28000 stay open. No admin = no
 #       whitelist.
 #     - BF SITL's PORT_PWM is hardcoded to 9002 (sitl.c #define), so
 #       redirecting at the BF layer isn't an option — only relay works.
 if [ "$USE_RELAY" = "1" ]; then
   BF_SIM_ARG="127.0.0.1"
-  echo "[sitl] BF -> 127.0.0.1:9002 (container loopback) -> socat -> ${HOST_IPV4}:${HOST_MOTOR_PORT} (host bridge)"
-  # `fork` is required: UDP4-RECVFROM without fork only handles the
-  # FIRST datagram (verified — drop fork and rx falls from ~50% to 0.1%).
-  # Each datagram spawns a child that exits after sendto. ~250 forks/sec
-  # at lockstep rate is fine for session-length runs; if you need to
-  # support hour-long flights, replace with a single-process relay
-  # (e.g. tiny python socket loop) to stay clear of the cgroup PID cap.
-  socat -u UDP4-RECVFROM:9002,bind=127.0.0.1,fork,reuseaddr=1 \
-        UDP4-SENDTO:${HOST_IPV4}:${HOST_MOTOR_PORT} &
+  echo "[sitl] BF -> 127.0.0.1:9002 (container loopback) -> motor_relay.py -> ${HOST_IPV4}:${HOST_MOTOR_PORT} (host bridge)"
+  # Single-process Python relay. socat with `fork` was the original
+  # implementation but added 50-200 ms per-packet latency (each fork
+  # rebuilds a socket + does sendto + exits) which throttled Pegasus's
+  # physics loop to ~2 Hz. The Python loop holds one bound socket and
+  # one outbound socket and forwards every packet in <1 ms.
+  python3 ./motor_relay.py "${HOST_IPV4}" "${HOST_MOTOR_PORT}" &
   RELAY_PID=$!
-  echo "[sitl] socat motor-relay started (pid=$RELAY_PID)"
-  sleep 0.3   # ensure socat bind completes before BF starts sending
+  echo "[sitl] motor_relay.py started (pid=$RELAY_PID)"
+  sleep 0.3   # let the bind complete before BF starts sending
 else
   BF_SIM_ARG="${HOST_IPV4}"
   echo "[sitl] BF -> ${HOST_IPV4}:9002 (host bridge, direct, no relay)"

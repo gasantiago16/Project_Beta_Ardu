@@ -12,7 +12,7 @@ services:
       # NOTE: 9002 is intentionally NOT mapped. By default (Windows), BF's
       # motor packets go to 127.0.0.1:9002 inside the container, where
       # socat picks them up and forwards to host:${SITL_HOST_MOTOR_PORT}
-      # (default 19500). The bridge listens there.
+      # (default 38500). The bridge listens there.
       # On Linux/Mac without the Windows Defender block, set
       # SITL_USE_MOTOR_RELAY=0 + SITL_HOST_MOTOR_PORT=9002 and add
       # "9002:9002/udp" back here.
@@ -24,7 +24,7 @@ services:
       SITL_SIM_HOST: "${SITL_SIM_HOST:-host.docker.internal}"
       # Where the in-container socat relay forwards motor packets. Must
       # match BetaflightBackendConfig.motor_port on the host bridge side.
-      SITL_HOST_MOTOR_PORT: "${SITL_HOST_MOTOR_PORT:-19500}"
+      SITL_HOST_MOTOR_PORT: "${SITL_HOST_MOTOR_PORT:-38500}"
       # Set 0 on Linux/Mac to skip the relay entirely (BF will send motors
       # straight to ${SITL_SIM_HOST}:9002 — re-add the 9002 port mapping).
       SITL_USE_MOTOR_RELAY: "${SITL_USE_MOTOR_RELAY:-1}"

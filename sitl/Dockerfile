@@ -45,21 +45,23 @@ RUN GCC_VER=$(arm-none-eabi-gcc -dumpversion) && \
 FROM debian:bookworm-slim AS runtime
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        netcat-openbsd ca-certificates socat \
+        netcat-openbsd ca-certificates socat python3-minimal \
     && rm -rf /var/lib/apt/lists/*
-# socat: in-container UDP relay. Windows Defender Firewall blocks inbound
-# UDP on a range of ports — 9002, 9012, and (after a few binds) 19012
-# all got blocked, while 9050/9077/19077/19500/28000/35000 stayed open.
-# Without admin we can't whitelist. start.sh tells BF to send motor
-# packets to 127.0.0.1:9002 (container loopback), and socat forwards
-# every packet to host.docker.internal:19500 — high enough to dodge
-# the heuristic + a port nothing else commonly uses.
+# python3-minimal: powers `motor_relay.py`, a single-process UDP relay
+# from BF's hardcoded 127.0.0.1:9002 output to host:38500. socat is kept
+# only for ad-hoc debugging — its fork-per-packet model adds 50-200 ms
+# of latency that throttles Pegasus's physics loop down to ~2 Hz.
+# Windows Defender Firewall blocks inbound UDP on a range of ports
+# (9002, 9012 verified blocked; 38500/28000/35000 verified open) and we
+# can't whitelist without admin, so the relay always runs in the default
+# Windows topology. Linux/Mac users skip it via SITL_USE_MOTOR_RELAY=0.
 
 WORKDIR /opt/sitl
 COPY --from=build /opt/betaflight/obj/main/betaflight_SITL.elf ./betaflight_SITL
 COPY defaults.txt ./defaults.txt
 COPY start.sh ./start.sh
-RUN chmod +x ./start.sh ./betaflight_SITL
+COPY motor_relay.py ./motor_relay.py
+RUN chmod +x ./start.sh ./betaflight_SITL ./motor_relay.py
 
 # BF SITL ports (per BF 4.5.1 src/main/target/SITL/sitl.c):
 #   5761 — MSP / CLI TCP
