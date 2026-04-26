@@ -1,0 +1,14 @@
+{
+  "_doc": "Radiomaster Pocket running EdgeTX in USB Joystick (HID) mode, default AETR layout. Maps SDL/pygame axis indices to BF RC channels (1-8). pygame axis range is [-1, +1]; we map that to PWM µs [1000, 2000]. Adjust `invert` per axis if the radio reports stick-up as -1 (some EdgeTX configs do). `deadband` is the |axis| below which the channel is forced to 0 (i.e., centered = 1500 µs); 0.04 is conservative for the Pocket. AUX axes have no deadband — switches step discretely so any value is intentional. If your radio reports throttle as 0..+1 instead of -1..+1, set throttle.invert=true won't help — you'll need a custom mapping (or fix it on the radio side).",
+
+  "channels": [
+    {"name": "roll",     "axis": 0, "invert": false, "deadband": 0.04},
+    {"name": "pitch",    "axis": 1, "invert": true,  "deadband": 0.04},
+    {"name": "throttle", "axis": 2, "invert": true,  "deadband": 0.0},
+    {"name": "yaw",      "axis": 3, "invert": false, "deadband": 0.04},
+    {"name": "aux1",     "axis": 4, "invert": false, "deadband": 0.0},
+    {"name": "aux2",     "axis": 5, "invert": false, "deadband": 0.0},
+    {"name": "aux3",     "axis": 6, "invert": false, "deadband": 0.0},
+    {"name": "aux4",     "axis": 7, "invert": false, "deadband": 0.0}
+  ]
+}
