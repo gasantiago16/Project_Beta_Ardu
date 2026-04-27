@@ -15,6 +15,14 @@
 # and silently dropped our arm signal.
 set msp_override_channels_mask = 255
 set mag_hardware = NONE
+# BF SITL's barometer needs to be explicitly told to read pressure from
+# FDM packets (the "VIRTUAL" hardware type). Default is NONE, which
+# makes MSP_ALTITUDE return 0 throughout flight even when the bridge
+# is pumping pressure values for a climbing drone. Without this,
+# mission_demo's CLIMB→X_LEG transition never fires (rel_alt stuck at
+# 0), and any altitude PID controller (flight_profile included) sees
+# no feedback. Status shows BARO=VIRTUAL after this is set.
+set baro_hardware = VIRTUAL
 # Without a motor protocol BF refuses to arm with MOTOR_PROTO flag.
 # PWM works in SITL where DSHOT/proshot don't (no real motor h/w).
 set motor_pwm_protocol = PWM
