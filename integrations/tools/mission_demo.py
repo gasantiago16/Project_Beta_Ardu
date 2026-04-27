@@ -161,8 +161,16 @@ class MissionConfig:
     # (chasing a phantom `gps_rescue_throttle_hover` BF setting that
     # 4.5.1 renamed/removed — Iris sank silently during CLIMB).
     throttle_hover_us: int = 1641
+    # P-only altitude controller — no Kd. kp=6, max_offset=200 climbs
+    # aggressively (30% above hover at full error) to get ABOVE the
+    # ground physics weirdness as fast as possible. A gentler 3.0/100
+    # left the drone hovering near z=0 where IrisSim's lack of ground
+    # friction lets ANGLE-mode mixer torques tip the drone, BF saturates
+    # motors trying to recover, drone slides off the map. Better to
+    # overshoot to ~19 m and oscillate within a few m than to never
+    # gain altitude. Real fix is a Kd term keyed to vario; tracked.
     throttle_kp_per_m: float = 6.0
-    throttle_max_offset: int = 200          # cap above hover (1640+200=1840)
+    throttle_max_offset: int = 200
     # Idle throttle during ARM phase. Must be < BF's min_check (1050)
     # so the THROTTLE arming-disable flag clears before AUX1 high
     # triggers the ARM box.
@@ -668,7 +676,7 @@ def main() -> int:
             snap = mission.last_snap if hasattr(mission, "last_snap") else None
             if snap is not None and mission.should_send_msp():
                 rc = mission.compute_rc(snap, t0)
-                rc[SLOT_THROTTLE] = min(rc[SLOT_THROTTLE], 1840)
+                rc[SLOT_THROTTLE] = min(rc[SLOT_THROTTLE], 1841)
                 fc.send_overrides(rc)
                 if t0 - last_rc_log > 1.0:
                     last_rc_log = t0
