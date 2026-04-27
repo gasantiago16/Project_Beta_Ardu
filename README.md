@@ -1,5 +1,10 @@
 # Betaflight + Autonomous Nav Integration for Racing Drones
 
+> 🟡 **Active work (Apr 26-27 2026):** HITL flight in Pegasus + Isaac
+> Sim. Wire path is locked at 67 Hz; BF arming RXLOSS blocker is open.
+> **Pick-up-cold doc:** [`HANDOFF.md`](HANDOFF.md). Branch:
+> `pegasus-bridge`.
+>
 > **Build guide entry point:** [`docs/00_START_HERE.md`](docs/00_START_HERE.md)
 > **Companion software:** [`companion/`](companion/) (Python, runs on Pi Zero 2W)
 > **Betaflight CLI configs:** [`bf_config/`](bf_config/)

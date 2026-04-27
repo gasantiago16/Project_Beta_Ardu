@@ -239,9 +239,19 @@ if args.motor_port == 0:
     # one — avoids a full container restart (~5 s vs ~30 s).
     try:
         import subprocess
+        # The container is debian-slim — no pkill, no procps. Find the
+        # PID by reading /proc and kill via the kill builtin instead.
+        kill_relay = (
+            "for f in /proc/[0-9]*/cmdline; do "
+            "  if grep -q motor_relay.py \"$f\" 2>/dev/null; then "
+            "    pid=$(echo $f | sed 's|/proc/||;s|/cmdline||'); "
+            "    kill $pid 2>/dev/null; "
+            "  fi; "
+            "done; sleep 0.3"
+        )
         subprocess.run(
             ["docker", "exec", "project-beta-ardu-sitl", "bash", "-c",
-             f"pkill -f motor_relay.py; sleep 0.3; "
+             f"{kill_relay}; "
              f"python3 /opt/sitl/motor_relay.py 192.168.65.254 {args.motor_port} >/dev/null 2>&1 &"],
             check=False, timeout=5,
         )
