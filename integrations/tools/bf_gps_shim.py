@@ -37,12 +37,20 @@ from __future__ import annotations
 import argparse
 import logging
 import math
+import os
 import socket
 import struct
 import sys
+import tempfile
 import threading
 import time
 from dataclasses import dataclass
+
+
+# Must match sim_loop.DEFAULT_SIM_STATE_FILE.
+DEFAULT_SIM_STATE_FILE = os.path.join(
+    tempfile.gettempdir(), "bf_sim_state.txt",
+)
 
 log = logging.getLogger("bf_gps_shim")
 
@@ -139,7 +147,7 @@ class ShimConfig:
     # VIRTUAL baro doesn't actually convert FDM pressure → alt, so
     # MSP_ALTITUDE responses we'd cache are useless. The shim then
     # synthesizes MSP_ALTITUDE the same way it synthesizes MSP_RAW_GPS.
-    sim_state_file: str = "/tmp/sim_loop_state.txt"
+    sim_state_file: str = ""  # filled from DEFAULT_SIM_STATE_FILE in main()
     sim_state_max_age_s: float = 1.0  # warn if stale beyond this
 
 
@@ -384,6 +392,8 @@ def synthesize_raw_gps(integrator: PositionIntegrator, cfg: ShimConfig) -> bytes
     return _msp_response(MSP_RAW_GPS, payload)
 
 
+_synth_alt_log_counter = [0]
+
 def synthesize_altitude(integrator: PositionIntegrator,
                         cfg: ShimConfig) -> bytes:
     """Build an MSP_ALTITUDE response from the integrator's altitude.
@@ -402,17 +412,13 @@ def synthesize_altitude(integrator: PositionIntegrator,
       i16 vario_cms
     """
     s = integrator.snapshot()
-    # The integrator stores absolute altitude (origin + relative).
-    # mission_demo computes rel_alt = (alt_cm/100) - home.alt_m, where
-    # home.alt_m was captured at INIT. So we want alt_cm to track the
-    # ABSOLUTE altitude (= integrator's alt_m). At INIT, alt_m =
-    # origin_alt_m + 0 = 100m, so home.alt_m=100. After climb to 5m
-    # in sim, alt_m=105m, rel = 5m. ✓
     alt_cm = int(round(s["alt_m"] * 100))
-    # Vario = vertical speed. We don't track it explicitly in the
-    # integrator; approximate as 0 (mission_demo doesn't use vario).
     vario_cms = 0
     payload = struct.pack("<ih", alt_cm, vario_cms)
+    _synth_alt_log_counter[0] += 1
+    if _synth_alt_log_counter[0] % 50 == 1:  # log every ~5s at 10Hz polling
+        log.info("[synth] MSP_ALTITUDE alt_m=%.2f → alt_cm=%d (origin=%.1f)",
+                 s["alt_m"], alt_cm, cfg.origin_alt_m)
     return _msp_response(MSP_ALTITUDE, payload)
 
 
@@ -667,6 +673,9 @@ def main() -> int:
     p.add_argument("--origin-lon", type=float, default=-73.9560)
     p.add_argument("--origin-alt", type=float, default=100.0)
     p.add_argument("--sats", type=int, default=12)
+    p.add_argument("--sim-state-file", default=DEFAULT_SIM_STATE_FILE,
+                   help=f"Path to sim_loop's state file (default: "
+                        f"{DEFAULT_SIM_STATE_FILE})")
     p.add_argument("--log-level", default="INFO")
     args = p.parse_args()
 
@@ -684,7 +693,9 @@ def main() -> int:
         origin_lon_deg=args.origin_lon,
         origin_alt_m=args.origin_alt,
         sat_count=args.sats,
+        sim_state_file=args.sim_state_file,
     )
+    log.info("sim state file: %s", cfg.sim_state_file)
 
     integrator = PositionIntegrator(cfg)
     log.info("starting position integrator (passive — observes "

@@ -44,12 +44,22 @@ from __future__ import annotations
 import argparse
 import logging
 import math
+import os
 import sys
+import tempfile
 import time
 from dataclasses import dataclass, field
 
 import numpy as np
 from scipy.spatial.transform import Rotation
+
+
+# Shared by sim_loop (writer) and bf_gps_shim (reader). Use tempfile so
+# the path is correct on both Windows (where Git Bash's /tmp may not be
+# what Python sees) and Linux. Override via --state-file if needed.
+DEFAULT_SIM_STATE_FILE = os.path.join(
+    tempfile.gettempdir(), "bf_sim_state.txt",
+)
 
 from integrations.pegasus_betaflight_backend import (
     BetaflightBackendConfig,
@@ -210,10 +220,11 @@ def main() -> int:
                    help="Sim integration rate. 200 Hz keeps angular dynamics "
                         "stable; reduce only if CPU-bound.")
     p.add_argument("--log-period-s", type=float, default=2.0)
-    p.add_argument("--state-file", default="/tmp/sim_loop_state.txt",
-                   help="Where to publish the current sim state (read by "
-                        "bf_gps_shim's MSP_ALTITUDE synthesizer). One line: "
-                        "n_m e_m alt_m yaw_deg.")
+    p.add_argument("--state-file", default=DEFAULT_SIM_STATE_FILE,
+                   help=f"Where to publish the current sim state (read by "
+                        f"bf_gps_shim's MSP_ALTITUDE synthesizer). One line: "
+                        f"n_m e_m alt_m yaw_deg. Default: "
+                        f"{DEFAULT_SIM_STATE_FILE}")
     p.add_argument("--log-level", default="INFO")
     args = p.parse_args()
 
