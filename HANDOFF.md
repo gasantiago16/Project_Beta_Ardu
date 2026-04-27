@@ -13,7 +13,8 @@
 | Bridge wire (host ↔ BF over UDP via in-container relay) | ✅ Locked at ~67 Hz, 0 timeouts, rx ≈ tx in steady state | `[bridge] tx=336 rx=334 in 5.0s (67 Hz)` |
 | Final_World scene + Iris spawn | ✅ Renders cleanly in Isaac Sim | One window, road junction asphalt visible, Iris visible at spawn |
 | **BF arming → motors actually spin** | ✅ **WORKING.** `motor w = 722.2 rad/s, raw=0.706` at hover throttle | `bf_diag` shows `flags=0x00000000 [(none — armable)]`, then `NOT_DISARMED` after AUX1 high |
-| `hover_test` end-to-end | ✅ Iris should lift off at hover throttle 1500 (Iris airframe) | Bridge raw=0.706 = ~706 us motor PWM ≈ 70% throttle |
+| `hover_test` end-to-end | ⚠️ Companion's `BetaflightAdapter.send_overrides` doesn't currently arm BF in this stack — use `bf_diag --mode arm` instead. Bug being chased under task #42. | hover_test rc[3] never reaches BF (BF stays in failsafe channels) |
+| **`bf_diag --mode arm` end-to-end through Pegasus → Iris in Isaac Sim** | ✅ **VERIFIED VISIBLY FLYING** | Bridge `motor w=522,522,521,521 rad/s` at hover_throttle=1500; user confirms "moved up and stopped" |
 | `mission_demo` flight | ❌ Blocked by virtual GPS not wired | mission_demo hangs on INIT phase (≥8 GPS sats; BF SITL has no GPS provider) — task #39 |
 | **Companion `CH_THROTTLE/CH_YAW` real-flight bug** | ❌ **NEW BUG FOUND** — see "Real-flight risks" below | task #42 |
 
@@ -49,6 +50,34 @@ AUX1 → 2000 → throttle ramp → motors output **0.706 normalized = 706 us
 above min, 70% throttle**.
 
 ---
+
+## Canonical "is the sim working?" check
+
+**Always run this first, before re-deriving setup from memory.**
+
+```powershell
+docker compose -f $PROJ\sitl\docker-compose.yml up -d
+& $PY -m integrations.tools.verify_sim_arms --motor-port 28500
+```
+
+PASS criteria:
+- Stage 1: ≥3/5 UDP packets delivered (container→host wire is live)
+- Stage 2: tx≈1000, rx>100, max_motor_norm>0.4, samples>500 rad/s ≥5
+
+If Stage 1 fails: try a different `--motor-port` (28500 / 35000 / 19077),
+drop the VPN, or restart Docker Desktop.
+
+If Stage 2 fails: arming-disable flags pin the bug. Run
+`python -m integrations.tools.bf_diag --duration-s 25 --interval-s 1.0
+--mode arm --idle-s 12` and read the `flags=` line.
+
+If Stage 1 passes but Stage 2 fails with rx=0: relay isn't running on
+the port, or got killed by a previous `docker exec`. Restart it:
+
+```powershell
+docker exec -d project-beta-ardu-sitl bash -c `
+  "cd /opt/sitl && python3 motor_relay.py 192.168.65.254 28500"
+```
 
 ## Reproduce the blocker (4 commands)
 
@@ -247,6 +276,26 @@ this session — sim-to-real surface area didn't grow. 159/159
 companion tests still green.
 
 ---
+
+## ⚠️ Windows VPN + WSL2 + Docker = container→host UDP blackhole
+
+If you have a VPN client running on Windows (NordVPN, OpenVPN, Cisco
+AnyConnect, anything that adds a TUN/TAP adapter), Docker Desktop's
+vpnkit container→host UDP forwarding gets intermittently captured by
+the VPN's routing table. **Symptom:** `bf_diag` works for one run, then
+the next run gets `rx=0` on the bridge even though `[fake_pegasus]`
+shows tx-only. Looks identical to Windows Defender Firewall heuristic
+blocking — but isn't.
+
+**Fix:** drop the VPN before running the SITL stack. Verified empirically
+today (Apr 27): same setup blackholed UDP under VPN, immediately worked
+when VPN dropped, and the bridge captured 0.706 motor values during armed
+flight.
+
+If you genuinely need the VPN up, options:
+- Run the whole stack inside WSL2 (no vpnkit hop). Linux Docker works
+  natively without the container→host hypervisor crossing.
+- Use a VPN that supports split-tunnel and exclude `192.168.65.0/24`.
 
 ## If you get stuck
 

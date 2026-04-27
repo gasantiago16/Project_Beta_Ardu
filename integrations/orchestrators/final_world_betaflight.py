@@ -249,10 +249,15 @@ if args.motor_port == 0:
             "  fi; "
             "done; sleep 0.3"
         )
+        # `setsid` detaches the new relay from the docker-exec session
+        # so it doesn't get SIGHUPed when bash exits. Without setsid,
+        # the new relay died the moment subprocess.run returned, and
+        # the bridge would get rx=0 forever.
         subprocess.run(
             ["docker", "exec", "project-beta-ardu-sitl", "bash", "-c",
              f"{kill_relay}; "
-             f"python3 /opt/sitl/motor_relay.py 192.168.65.254 {args.motor_port} >/dev/null 2>&1 &"],
+             f"setsid python3 /opt/sitl/motor_relay.py 192.168.65.254 "
+             f"{args.motor_port} </dev/null >/dev/null 2>&1 &"],
             check=False, timeout=5,
         )
         print(

@@ -38,7 +38,15 @@ def main() -> int:
     p.add_argument("--hover-throttle", type=int, default=1500,
                    help="PWM us. Iris hovers around 1500 with default thrust "
                         "curve; bump to 1600 if it sags. Race-quad: ~1300.")
-    p.add_argument("--ramp-s", type=float, default=1.0)
+    p.add_argument("--throttle-min", type=int, default=950,
+                   help="Idle throttle PWM. Must be < BF min_check (default "
+                        "1050) for the THROTTLE arming flag to clear. 950 "
+                        "leaves margin.")
+    p.add_argument("--ramp-s", type=float, default=2.0)
+    p.add_argument("--idle-s", type=float, default=10.0,
+                   help="Idle phase before arming. BF's ANGLE arming flag "
+                        "takes ~7 s to clear after FDM IMU starts flowing; "
+                        "10 s leaves margin. Verified via bf_diag.")
     p.add_argument("--duration-s", type=float, default=20.0,
                    help="How long to hold hover after ramp.")
     args = p.parse_args()
@@ -73,30 +81,37 @@ def main() -> int:
         fc.send_overrides([roll, pitch, throttle, yaw, aux1, aux2, aux3, aux4])
 
     try:
-        # Phase 1: neutral RC, 2 s. Lets BF's RC failsafe deassert.
-        log.info("phase 1: idle RC (2 s)")
+        # Phase 1: idle RC for ANGLE/RX_FAILSAFE flags to clear. BF's
+        # IMU is uninitialized for the first ~7 s of FDM flow, leaving
+        # the ANGLE arming flag set even though `small_angle=180` would
+        # nominally allow any orientation. 10 s is the empirically
+        # verified threshold (see HANDOFF.md "What flipped from blocker
+        # to working").
+        log.info("phase 1: idle RC for %.1f s (waiting for ANGLE flag to clear)",
+                 args.idle_s)
         t0 = time.monotonic()
-        while time.monotonic() - t0 < 2.0:
-            send(1500, 1500, 1000, 1500, aux1=1000)
+        while time.monotonic() - t0 < args.idle_s:
+            send(1500, 1500, args.throttle_min, 1500, aux1=1000)
             time.sleep(dt)
 
-        # Phase 2: arm. AUX1 high while throttle is min.
+        # Phase 2: arm. AUX1 high while throttle is below mincheck (1050).
         log.info("phase 2: ARMING (AUX1 -> 2000)")
         t0 = time.monotonic()
         while time.monotonic() - t0 < 1.0:
-            send(1500, 1500, 1000, 1500, aux1=2000)
+            send(1500, 1500, args.throttle_min, 1500, aux1=2000)
             time.sleep(dt)
 
-        # Phase 3: ramp throttle from 1000 -> hover.
-        log.info("phase 3: throttle ramp 1000 -> %d over %.1f s",
-                 args.hover_throttle, args.ramp_s)
+        # Phase 3: ramp throttle throttle_min -> hover.
+        log.info("phase 3: throttle ramp %d -> %d over %.1f s",
+                 args.throttle_min, args.hover_throttle, args.ramp_s)
         ramp_start = time.monotonic()
         while True:
             elapsed = time.monotonic() - ramp_start
             if elapsed >= args.ramp_s:
                 break
             t = elapsed / args.ramp_s
-            thr = int(1000 + t * (args.hover_throttle - 1000))
+            thr = int(args.throttle_min +
+                      t * (args.hover_throttle - args.throttle_min))
             send(1500, 1500, thr, 1500, aux1=2000)
             time.sleep(dt)
 
@@ -111,11 +126,11 @@ def main() -> int:
     except KeyboardInterrupt:
         log.info("interrupted; landing + disarming")
     finally:
-        # Land cushion: throttle to 1000, then disarm.
-        log.info("landing: throttle 1000 + AUX1 low (1 s)")
+        # Land cushion: throttle to throttle_min, then disarm.
+        log.info("landing: throttle %d + AUX1 low (1 s)", args.throttle_min)
         t0 = time.monotonic()
         while time.monotonic() - t0 < 1.0:
-            send(1500, 1500, 1000, 1500, aux1=1000)
+            send(1500, 1500, args.throttle_min, 1500, aux1=1000)
             time.sleep(dt)
         try:
             fc.close()
