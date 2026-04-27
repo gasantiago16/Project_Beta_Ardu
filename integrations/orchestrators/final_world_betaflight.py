@@ -57,6 +57,7 @@ not reachable from inside Docker, etc.).
 import argparse
 import os
 import socket
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -186,6 +187,110 @@ def _preflight_or_die() -> None:
     print("[final_world_betaflight] Pre-flight: BF SITL MSP up.", flush=True)
 
 
+def _preflight_udp_or_die(motor_port: int) -> None:
+    """Verify container→host UDP delivery on the chosen motor port.
+
+    The TCP pre-flight only proves BF's MSP is reachable from the host. The
+    return path (BF's motor packets coming OUT to the host) goes over a
+    different transport — UDP, often through Docker Desktop's WSL2 backend
+    — and has its own failure modes that look identical to the TCP path
+    being fine:
+
+      - VPN active on the Windows host: container→host UDP is blackholed
+        even though the relay reports forwarding cleanly. Drop the VPN and
+        re-run; this has burned an hour on the project before. See
+        memory/project_beta_ardu_vpn_udp_blackhole.md.
+      - Windows Defender Firewall heuristic block on certain ports
+        (9002, 9012 verified blocked; 28000-35000 verified open). No
+        pop-up, just silent drops — pick a different --motor-port.
+
+    Same probe pattern as verify_sim_arms stage 1: bind UDP locally, fire
+    5 datagrams from inside the container with `nc -u`, count receipts.
+    """
+    if args.skip_preflight:
+        return
+    print(
+        f"[final_world_betaflight] Pre-flight: container→host UDP on "
+        f":{motor_port}...",
+        flush=True,
+    )
+    rx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    rx.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        rx.bind(("0.0.0.0", motor_port))
+    except OSError as e:
+        print(
+            f"[final_world_betaflight] FATAL: cannot bind UDP :{motor_port} "
+            f"on host ({type(e).__name__}: {e}). Another process is probably "
+            f"holding it (look for a stale sim_loop / fake_pegasus_loop / "
+            f"BetaflightUdpBackend). On Windows, "
+            f"`Get-NetTCPConnection -LocalPort {motor_port}`.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    rx.settimeout(0.3)
+
+    # `host.docker.internal` resolves to the Windows host bridge from inside
+    # the container — same address BF SITL uses for its motor packets. We
+    # use 192.168.65.254 directly because the container's `getent ahostsv4`
+    # path picks the Docker Desktop fixed IPv4 that BF inet_addr() also
+    # uses (BF's own resolver path is documented in sitl/start.sh).
+    triggered = False
+    try:
+        subprocess.run(
+            [
+                "docker", "exec", "project-beta-ardu-sitl", "bash", "-c",
+                f"for i in 1 2 3 4 5; do "
+                f"  echo X | nc -u -w 0 192.168.65.254 {motor_port}; "
+                f"done",
+            ],
+            check=False, timeout=5,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        triggered = True
+    except (subprocess.TimeoutExpired, FileNotFoundError) as e:
+        print(
+            f"[final_world_betaflight] WARN: could not invoke `docker exec` "
+            f"to trigger UDP probe ({type(e).__name__}: {e}). Skipping UDP "
+            f"pre-flight; you'll find out from bridge stats whether the path "
+            f"is actually working.",
+            file=sys.stderr,
+        )
+
+    if triggered:
+        time.sleep(0.3)
+        got = 0
+        deadline = time.time() + 1.0
+        while time.time() < deadline:
+            try:
+                rx.recvfrom(64)
+                got += 1
+            except socket.timeout:
+                break
+        rx.close()
+        if got < 3:
+            print(
+                f"[final_world_betaflight] FATAL: container→host UDP on "
+                f":{motor_port} delivered only {got}/5 probe packets.\n"
+                f"  Most likely cause: VPN active on the Windows host\n"
+                f"    (WSL2 + Docker Desktop blackholes UDP under a VPN —\n"
+                f"     drop the VPN and re-run BEFORE other diagnostics).\n"
+                f"  Next: Windows Defender Firewall blocking this port.\n"
+                f"    Try --motor-port 28500 / 35000 (verified open),\n"
+                f"    or --skip-preflight if you've manually verified the\n"
+                f"    UDP path elsewhere.",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        print(
+            f"[final_world_betaflight] Pre-flight: container→host UDP OK "
+            f"({got}/5 packets).",
+            flush=True,
+        )
+    else:
+        rx.close()
+
+
 def _resolve_spawn_or_die() -> None:
     """Compute final spawn point. --spawn wins over --corner. Mutates args."""
     if args.spawn is not None:
@@ -238,7 +343,6 @@ if args.motor_port == 0:
     # Uses `docker exec` to kill the existing relay and start a fresh
     # one — avoids a full container restart (~5 s vs ~30 s).
     try:
-        import subprocess
         # The container is debian-slim — no pkill, no procps. Find the
         # PID by reading /proc and kill via the kill builtin instead.
         kill_relay = (
@@ -279,6 +383,11 @@ else:
         f"(must match SITL container's SITL_HOST_MOTOR_PORT env)",
         flush=True,
     )
+
+# UDP pre-flight: now that the relay is targeting the chosen motor port,
+# verify packets actually arrive. Catches VPN-on-Windows and Defender
+# Firewall blocks BEFORE Isaac Sim starts (saves ~30s of warmup).
+_preflight_udp_or_die(args.motor_port)
 
 # Make integrations/ importable.
 sys.path.insert(0, args.integrations_dir)
