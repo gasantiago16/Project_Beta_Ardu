@@ -1,25 +1,52 @@
-# HANDOFF — Project_Beta_Ardu HITL flight (Apr 26 EOD → Apr 27)
+# HANDOFF — Project_Beta_Ardu HITL flight (Apr 27 update)
 
-**Audience:** Jeremy (or anyone picking this up cold tomorrow).
-**Read time:** 5 minutes. Then 10 minutes to reproduce the blocker.
-
-If you only read one thing, read the **Status table** + **Reproduce
-the blocker** below. The rest is supporting detail.
+**Audience:** Jeremy (or anyone picking this up cold).
+**Read time:** 5 minutes. Then 10 minutes to reproduce the working stack.
 
 ---
 
-## Status table
+## Status table (Apr 27 13:00 — UPDATED)
 
 | Layer | State | Evidence |
 |---|---|---|
 | BF SITL Docker container | ✅ Builds + boots clean | `docker logs project-beta-ardu-sitl` shows `[sitl] Phase 2 MSP up` + `[sitl] Ready` |
 | Bridge wire (host ↔ BF over UDP via in-container relay) | ✅ Locked at ~67 Hz, 0 timeouts, rx ≈ tx in steady state | `[bridge] tx=336 rx=334 in 5.0s (67 Hz)` |
 | Final_World scene + Iris spawn | ✅ Renders cleanly in Isaac Sim | One window, road junction asphalt visible, Iris visible at spawn |
-| **BF arming → motors actually spin** | ❌ **Blocker.** `motor=0,0,0,0` even when `hover_test` sends AUX1=2000 + throttle=1700 | BF status: `Arming disable flags: RXLOSS CLI` |
-| `mission_demo` flight | ❌ Blocked by arming + virtual GPS not wired | mission_demo hangs on INIT phase (waits for ≥8 GPS sats; BF SITL has no GPS provider) |
+| **BF arming → motors actually spin** | ✅ **WORKING.** `motor w = 722.2 rad/s, raw=0.706` at hover throttle | `bf_diag` shows `flags=0x00000000 [(none — armable)]`, then `NOT_DISARMED` after AUX1 high |
+| `hover_test` end-to-end | ✅ Iris should lift off at hover throttle 1500 (Iris airframe) | Bridge raw=0.706 = ~706 us motor PWM ≈ 70% throttle |
+| `mission_demo` flight | ❌ Blocked by virtual GPS not wired | mission_demo hangs on INIT phase (≥8 GPS sats; BF SITL has no GPS provider) — task #39 |
+| **Companion `CH_THROTTLE/CH_YAW` real-flight bug** | ❌ **NEW BUG FOUND** — see "Real-flight risks" below | task #42 |
 
-**266/266 tests pass.** Tree is clean at `pegasus-bridge` branch
-(`gasantiago16/Project_Beta_Ardu`).
+**110/110 integration tests + 159/159 companion tests pass.** Tree is clean at
+`pegasus-bridge` branch (`gasantiago16/Project_Beta_Ardu`).
+
+---
+
+## What flipped from "blocker" to "working"
+
+Two layered bugs in `sitl/defaults.txt` + `integrations/tools/hover_test.py`,
+both diagnosed via the new `integrations/tools/bf_diag` tool:
+
+1. **`min_check = 1000`** (which I'd set thinking it relaxed throttle).
+   BF code is `if (rcData[THROTTLE] < mincheck) THROTTLE_LOW`. With
+   `mincheck=1000` and `throttle=1000`, `1000 < 1000` is FALSE → THROTTLE
+   flag stays set → ARM_SWITCH flag (derived) fires when AUX1 goes high
+   → motors stay at 0. Reverted to BF default 1050; `hover_test` now
+   sends throttle=950 at idle (well below 1050) so flag clears.
+2. **MSP_SET_RAW_RC slot order**. BF parses `rcChannelLetters="AERT..."`
+   with default rcmap `"AETR"` — meaning MSP slot 2 → `rcData[THROTTLE]`
+   and slot 3 → `rcData[YAW]`. `hover_test`'s slot order is
+   `[Roll, Pitch, Throttle, Yaw, AUX1...]` (T at slot 2, Y at slot 3) —
+   correct. (I briefly "fixed" it the other way and broke arming; the
+   commit history shows the back-and-forth.)
+3. **`small_angle = 180`** isn't enough — BF's IMU-uninitialized state
+   sets ANGLE flag for the first ~7 s after FDM starts flowing. Idle
+   phase before AUX1-high needs to be ≥ 10 s (`hover_test --ramp-s 2`
+   has only 1 s idle; `bf_diag --idle-s 10` is what reproduces flight).
+
+After all three: bf_diag at `t=10s` shows `flags=0x00000000 (armable)` →
+AUX1 → 2000 → throttle ramp → motors output **0.706 normalized = 706 us
+above min, 70% throttle**.
 
 ---
 
@@ -164,6 +191,39 @@ serial port.
   sharp edges discovered.
 
 ---
+
+## ⚠️ Real-flight risks discovered
+
+### Companion CH_THROTTLE/CH_YAW vs MSP slot mapping (task #42)
+
+**Bug**: `companion/racer_companion/msp.py` defines `CH_YAW=2,
+CH_THROTTLE=3` and `main.py` does `rc[msp.CH_THROTTLE] = throttle_hover`,
+which puts throttle at MSP frame slot 3. **But BF default rcmap "AETR"
+reads slot 3 as YAW** (because rcChannelLetters in BF source is
+`"AERT12345..."` and rcmap[YAW=2]=3, rcmap[THROTTLE=3]=2). So:
+
+- Companion's throttle command → BF's yaw input
+- Companion's yaw command → BF's throttle input
+
+If a real drone took off with the companion-active path, "throttle up"
+would yaw it instead of climbing, and the constant centered-yaw command
+would hold mid-throttle. Quad would spin without lifting off.
+
+**Why this hasn't been caught**: the companion has 159 unit tests but
+they all use mocks that don't simulate BF's rcmap. And no real drone
+has ever flown with this code (project is software-only so far). The
+SITL bridge would have caught it but never did because the bridge
+didn't reach the "armed motors actually spinning" state until today.
+
+**Fix options** (decide before next real-flight prep):
+- (A) Swap msp.py constants: `CH_THROTTLE=2, CH_YAW=3`. Smallest diff,
+  matches MSP frame layout under default AETR rcmap. Risks: any test
+  that hardcoded `rc[3]` for throttle needs updating.
+- (B) Apply rcmap translation in `encode_set_raw_rc`. More principled,
+  works with non-default rcmaps (e.g. TAER). Risks: more code to test.
+
+**Counter-agent the fix** before merging. 159 unit tests need to stay
+green plus a fresh `hover_test` run.
 
 ## Real-flight safety reminder
 

@@ -126,8 +126,12 @@ def main() -> int:
             if (i + 1) % args.print_every == 0:
                 ref = be.input_reference()
                 # ASCII-only: Windows cp1252 stdout can't encode "ω".
+                # Print rad/s + raw [0,1] motor values so we can tell
+                # disarmed (0,0,0,0) from armed-and-spinning at a glance.
+                m = be._latest_motor
                 print(f"  tick {i+1:>5d}: motor w = "
                       f"({ref[0]:6.1f}, {ref[1]:6.1f}, {ref[2]:6.1f}, {ref[3]:6.1f}) rad/s "
+                      f"| raw=({m[0]:.3f}, {m[1]:.3f}, {m[2]:.3f}, {m[3]:.3f}) "
                       f"| timeouts={be._timeouts}", flush=True)
 
             next_tick += dt

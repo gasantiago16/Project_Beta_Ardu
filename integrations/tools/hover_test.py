@@ -56,6 +56,20 @@ def main() -> int:
     def send(roll: int, pitch: int, throttle: int, yaw: int,
              aux1: int = 1000, aux2: int = 1000,
              aux3: int = 1000, aux4: int = 1000) -> None:
+        # MSP_SET_RAW_RC frame slots, given BF's default rcmap "AETR" +
+        # rxRuntimeState.rcReadRawFn pulling raw[i] then rcmap-translating
+        # into rcData[ROLL=0, PITCH=1, YAW=2, THROTTLE=3]:
+        #   slot 0 -> rcData[ROLL]      (Aileron)
+        #   slot 1 -> rcData[PITCH]     (Elevator)
+        #   slot 2 -> rcData[THROTTLE]  (Throttle)   ← throttle here
+        #   slot 3 -> rcData[YAW]       (Rudder)     ← yaw here
+        #   slot 4+ -> rcData[AUX1..]
+        # i.e. MSP slot order is [R, P, T, Y, AUX1, ...]. Verified live
+        # via integrations/tools/bf_diag against BF 4.5.1.
+        # NOTE: the companion's racer_companion/msp.py defines
+        # CH_THROTTLE=3 + CH_YAW=2 — that is INCONSISTENT with this
+        # MSP slot layout. See HANDOFF.md "Real-flight risks" for the
+        # bug write-up; this tool sends the slot order BF expects.
         fc.send_overrides([roll, pitch, throttle, yaw, aux1, aux2, aux3, aux4])
 
     try:
