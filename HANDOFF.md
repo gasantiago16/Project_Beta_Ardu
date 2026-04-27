@@ -221,6 +221,27 @@ serial port.
 
 ---
 
+## ANGLE mode tuning (Apr 27 update)
+
+ANGLE flight mode is now bound in `sitl/defaults.txt`
+(`aux 1 1 0 900 2100`). With ANGLE active + bridge frame conversion
+verified correct (probe_attitude shows roll/pitch round-trip cleanly),
+Iris hovers stably with motors at ~700-740 rad/s and 4-6% per-motor
+variance (BF's PID corrections, normal).
+
+**Hover throttle empirics:**
+| throttle | result |
+|----------|--------|
+| 1500 | Iris doesn't lift off cleanly; motors split 329-751 trying to right ground bounce |
+| 1700 | Motors at 700-740 rad/s, Iris climbs continuously (above hover equilibrium) |
+| ~1640 (estimated) | True hover; need closed-loop altitude control or careful ramp |
+
+For the **mission demo**, `mission_demo.py` already has a closed-loop
+altitude controller (`throttle_hover_us=1300` baseline + climb/descent
+offsets). For `hover_test` and `bf_diag` smoke tests, use 1700 to
+confirm flight and accept that Iris will climb. Real altitude hold
+is task #47.
+
 ## ⚠️ Real-flight risks discovered
 
 ### Companion CH_THROTTLE/CH_YAW vs MSP slot mapping (task #42)

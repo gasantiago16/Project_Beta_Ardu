@@ -44,11 +44,4 @@ set power_on_arming_grace_time = 0
 # and we never arm. `aux 0 0 0 1700 2100 0 0` = "ARM mode active when
 # AUX1 is in [1700,2100]".
 aux 0 0 0 1700 2100 0 0
-# NOTE: previously bound ANGLE mode here for self-leveling, but the
-# bridge's IMU frame conversion (accel-with-gravity / quat-NED-FRD)
-# has a sign mismatch with BF's expected convention — with ANGLE
-# active, BF's level controller fights the apparent tilt and motors
-# split asymmetrically (motors 1+3 saturate to 100%, motors 0+2
-# at idle), making Iris yaw uncontrollably instead of hovering.
-# Running in ACRO with motors centered at hover throttle is what
-# the user verified visually. Frame fix tracked as a follow-up task.
+aux 1 1 0 900 2100 0 0

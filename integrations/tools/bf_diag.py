@@ -39,6 +39,7 @@ MSP_HEADER_REQ = b"$M<"
 MSP_HEADER_RESP = b"$M>"
 
 MSP_RC = 105
+MSP_ATTITUDE = 108
 MSP_STATUS_EX = 150
 MSP_SET_RAW_RC = 200
 
@@ -191,6 +192,7 @@ def main() -> int:
 
     last_status: dict | None = None
     last_rc_values: list[int] | None = None
+    last_attitude: tuple[float, float, float] | None = None
     last_print = 0.0
 
     # MSP_SET_RAW_RC frame slot layout (default BF rcmap "AETR"):
@@ -245,11 +247,12 @@ def main() -> int:
                     break
             last_rc = now
 
-        # Poll status + RC at interval_s.
+        # Poll status + RC + attitude at interval_s.
         if now - last_poll >= args.interval_s:
             try:
                 s.sendall(build_request(MSP_STATUS_EX))
                 s.sendall(build_request(MSP_RC))
+                s.sendall(build_request(MSP_ATTITUDE))
             except OSError as e:
                 print(f"[bf_diag] sendall poll failed: {e}", flush=True)
                 break
@@ -264,6 +267,9 @@ def main() -> int:
                         last_status = parse_status_ex(payload)
                     elif cmd == MSP_RC:
                         last_rc_values = parse_rc(payload)
+                    elif cmd == MSP_ATTITUDE and len(payload) >= 6:
+                        roll, pitch, yaw = struct.unpack_from("<3h", payload, 0)
+                        last_attitude = (roll / 10.0, pitch / 10.0, float(yaw))
         except BlockingIOError:
             pass
         except OSError as e:
@@ -289,10 +295,14 @@ def main() -> int:
                 if last_rc_values and len(last_rc_values) >= 8
                 else "(no resp yet)"
             )
+            att_str = (
+                f"r={last_attitude[0]:+.1f} p={last_attitude[1]:+.1f} y={last_attitude[2]:+.1f}"
+                if last_attitude else "(no att yet)"
+            )
             print(
                 f"[bf_diag] t={elapsed:5.1f}s phase={phase:7s} "
                 f"sent={sent} | flags=0x{max(flags,0):08x} [{names}]\n"
-                f"[bf_diag]               rc[1..8]={rc_str}",
+                f"[bf_diag]               rc[1..8]={rc_str} | att {att_str}",
                 flush=True,
             )
             last_print = now
