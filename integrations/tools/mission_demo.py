@@ -155,13 +155,12 @@ class MissionConfig:
     pitch_max_us: float = 200.0
     yaw_align_threshold_deg: float = 25.0
 
-    # Iris hover throttle ≈ 1640 PWM in our sim_loop physics (verified
-    # empirically by flight_profile.py running clean climb/hover). Was
-    # 1300 — that targeted a `gps_rescue_throttle_hover` config that we
-    # never actually applied (BF 4.5.1 renamed/removed the setting), so
-    # at 1300 PWM Iris sank during CLIMB and the X-pattern silently
-    # completed on the ground.
-    throttle_hover_us: int = 1640
+    # Iris hover throttle = 1641 PWM, confirmed by
+    # `iris_hover_calibrate` (motor_norm 0.6411, vz < 1 mm/s after 4 s
+    # at this value). Was 1640 (1 µs below true hover) and earlier 1300
+    # (chasing a phantom `gps_rescue_throttle_hover` BF setting that
+    # 4.5.1 renamed/removed — Iris sank silently during CLIMB).
+    throttle_hover_us: int = 1641
     throttle_kp_per_m: float = 6.0
     throttle_max_offset: int = 200          # cap above hover (1640+200=1840)
     # Idle throttle during ARM phase. Must be < BF's min_check (1050)

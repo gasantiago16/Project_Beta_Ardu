@@ -113,8 +113,11 @@ def main() -> int:
 
     p.add_argument("--throttle-min", type=int, default=950,
                    help="Idle/disarm throttle. Must be < BF mincheck (1050).")
-    p.add_argument("--hover-throttle", type=int, default=1650,
-                   help="PD bias point during climb/hover/yaw. Iris hover ~1640.")
+    p.add_argument("--hover-throttle", type=int, default=1641,
+                   help="PD bias point during climb/hover/yaw. 1641 = exact "
+                        "Iris equilibrium per `iris_hover_calibrate` (motor_norm "
+                        "0.6411). Was 1650 — close but biased the controller "
+                        "9 µs above true hover.")
     p.add_argument("--descend-throttle", type=int, default=1500,
                    help="PD bias point during descent. Below hover → Iris "
                         "naturally settles; PD on top tracks the ramp.")
