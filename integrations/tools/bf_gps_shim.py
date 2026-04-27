@@ -69,7 +69,9 @@ MSP_STATUS_EX = 150
 # path identical between sim and real flight.
 CACHED_CMDS: frozenset[int] = frozenset({
     MSP_ATTITUDE,
-    MSP_ALTITUDE,
+    # MSP_ALTITUDE: NOT cached. We synthesize it from the integrator
+    # (driven by sim_loop's state file) because BF SITL's VIRTUAL baro
+    # in this build returns 0 even with FDM pressure being fed.
     MSP_RC,
     MSP_ANALOG,
     MSP_BOXNAMES,
@@ -130,6 +132,15 @@ class ShimConfig:
     # high reproduces the BF SITL stall (>3 Hz starts to be risky on
     # this Windows/Docker setup).
     cache_refresh_hz: float = 2.0
+
+    # File path where sim_loop publishes ground-truth state (n_m e_m
+    # alt_m yaw_deg). When set, the integrator overrides its own
+    # tracked position with sim_loop's truth — needed because BF SITL's
+    # VIRTUAL baro doesn't actually convert FDM pressure → alt, so
+    # MSP_ALTITUDE responses we'd cache are useless. The shim then
+    # synthesizes MSP_ALTITUDE the same way it synthesizes MSP_RAW_GPS.
+    sim_state_file: str = "/tmp/sim_loop_state.txt"
+    sim_state_max_age_s: float = 1.0  # warn if stale beyond this
 
 
 # ── MSP response cache ─────────────────────────────────────────────────────
@@ -254,11 +265,29 @@ class PositionIntegrator:
         dt_target = 1.0 / self.cfg.integrate_hz
         last_log = time.monotonic()
         last_t = time.monotonic()
+        last_sim_read = 0.0
+        sim_n = sim_e = sim_alt = sim_yaw = None
 
         while not self._stop.is_set():
             now = time.monotonic()
             actual_dt = max(0.0, now - last_t)
             last_t = now
+
+            # Read sim_loop's state file every 100 ms — it's the
+            # ground-truth for position. Overrides the attitude-based
+            # integration that doesn't have throttle visibility.
+            if now - last_sim_read >= 0.1:
+                last_sim_read = now
+                try:
+                    with open(self.cfg.sim_state_file, "r") as f:
+                        parts = f.read().strip().split()
+                    if len(parts) >= 4:
+                        sim_n = float(parts[0])
+                        sim_e = float(parts[1])
+                        sim_alt = float(parts[2])
+                        sim_yaw = float(parts[3])
+                except (OSError, ValueError):
+                    pass
 
             # Snapshot latest sensor reads.
             with self._lock:
@@ -279,15 +308,31 @@ class PositionIntegrator:
             a_e = a_body_fwd * sy + a_body_rt * cy
 
             with self._lock:
-                self._vn += a_n * actual_dt
-                self._ve += a_e * actual_dt
-                drag = min(1.0, self.cfg.horizontal_drag * actual_dt)
-                self._vn *= (1.0 - drag)
-                self._ve *= (1.0 - drag)
-                self._n_m += self._vn * actual_dt
-                self._e_m += self._ve * actual_dt
-                self._alt_m = self.cfg.origin_alt_m + (alt_cm / 100.0)
-                self._yaw_deg = yaw
+                if sim_n is not None:
+                    # Override with sim_loop's ground truth (preferred).
+                    # vn/ve are recomputed by simple finite-difference
+                    # so synthesized GPS speed/course look reasonable.
+                    new_n, new_e, new_alt = sim_n, sim_e, sim_alt
+                    if actual_dt > 0:
+                        self._vn = (new_n - self._n_m) / actual_dt
+                        self._ve = (new_e - self._e_m) / actual_dt
+                    self._n_m = new_n
+                    self._e_m = new_e
+                    self._alt_m = self.cfg.origin_alt_m + new_alt
+                    self._yaw_deg = sim_yaw if sim_yaw is not None else yaw
+                else:
+                    # Fallback: attitude-only integration (original path).
+                    # Used when sim_loop isn't running — degraded but
+                    # still gives some position estimate.
+                    self._vn += a_n * actual_dt
+                    self._ve += a_e * actual_dt
+                    drag = min(1.0, self.cfg.horizontal_drag * actual_dt)
+                    self._vn *= (1.0 - drag)
+                    self._ve *= (1.0 - drag)
+                    self._n_m += self._vn * actual_dt
+                    self._e_m += self._ve * actual_dt
+                    self._alt_m = self.cfg.origin_alt_m + (alt_cm / 100.0)
+                    self._yaw_deg = yaw
                 self._roll_deg = roll
                 self._pitch_deg = pitch
 
@@ -337,6 +382,38 @@ def synthesize_raw_gps(integrator: PositionIntegrator, cfg: ShimConfig) -> bytes
         int(round(course_deg * 10)) % 3600,
     )
     return _msp_response(MSP_RAW_GPS, payload)
+
+
+def synthesize_altitude(integrator: PositionIntegrator,
+                        cfg: ShimConfig) -> bytes:
+    """Build an MSP_ALTITUDE response from the integrator's altitude.
+
+    BF SITL 4.5.1's `baro_hardware = VIRTUAL` setting accepts the value
+    but the driver doesn't appear to convert FDM pressure into a usable
+    altitude estimate — MSP_ALTITUDE returns 0 throughout flight even
+    when the bridge is feeding pressure for a climbing drone. We
+    synthesize the response from the position integrator (which gets
+    its altitude indirectly: integrator.feed() runs on every passing
+    MSP_ALTITUDE response, but we now also drive the integrator's alt
+    directly from sim physics — see the FDM-side hook).
+
+    Wire format (matches msp.decode_altitude):
+      i32 alt_cm   (signed, cm — relative to home)
+      i16 vario_cms
+    """
+    s = integrator.snapshot()
+    # The integrator stores absolute altitude (origin + relative).
+    # mission_demo computes rel_alt = (alt_cm/100) - home.alt_m, where
+    # home.alt_m was captured at INIT. So we want alt_cm to track the
+    # ABSOLUTE altitude (= integrator's alt_m). At INIT, alt_m =
+    # origin_alt_m + 0 = 100m, so home.alt_m=100. After climb to 5m
+    # in sim, alt_m=105m, rel = 5m. ✓
+    alt_cm = int(round(s["alt_m"] * 100))
+    # Vario = vertical speed. We don't track it explicitly in the
+    # integrator; approximate as 0 (mission_demo doesn't use vario).
+    vario_cms = 0
+    payload = struct.pack("<ih", alt_cm, vario_cms)
+    return _msp_response(MSP_ALTITUDE, payload)
 
 
 # ── Per-client forwarder ───────────────────────────────────────────────────
@@ -454,6 +531,17 @@ class ClientForwarder:
                 # Synthesized from integrator — never reaches BF.
                 try:
                     self.down.sendall(synthesize_raw_gps(
+                        self.integrator, self.cfg,
+                    ))
+                except OSError:
+                    self._stop.set()
+                    return
+            elif cmd == MSP_ALTITUDE:
+                # Also synthesized — BF SITL's VIRTUAL baro returns 0
+                # in this build, so we compute alt from the integrator
+                # which mirrors sim_loop's truth.
+                try:
+                    self.down.sendall(synthesize_altitude(
                         self.integrator, self.cfg,
                     ))
                 except OSError:

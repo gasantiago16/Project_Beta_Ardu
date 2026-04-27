@@ -210,6 +210,10 @@ def main() -> int:
                    help="Sim integration rate. 200 Hz keeps angular dynamics "
                         "stable; reduce only if CPU-bound.")
     p.add_argument("--log-period-s", type=float, default=2.0)
+    p.add_argument("--state-file", default="/tmp/sim_loop_state.txt",
+                   help="Where to publish the current sim state (read by "
+                        "bf_gps_shim's MSP_ALTITUDE synthesizer). One line: "
+                        "n_m e_m alt_m yaw_deg.")
     p.add_argument("--log-level", default="INFO")
     args = p.parse_args()
 
@@ -259,11 +263,30 @@ def main() -> int:
             backend.update(actual_dt)
 
             now = time.monotonic()
+            # Publish current sim state for bf_gps_shim to synthesize
+            # MSP_ALTITUDE responses (BF SITL's VIRTUAL baro driver
+            # appears not to convert FDM pressure → alt in this build).
+            # Throttled to ~10 Hz so we don't thrash the filesystem.
+            if not hasattr(main, "_last_state_write"):
+                main._last_state_write = 0.0
+            if now - main._last_state_write >= 0.1:
+                main._last_state_write = now
+                try:
+                    rot_pub = Rotation.from_quat(sim.state.attitude)
+                    _, _, yaw_pub = rot_pub.as_euler("xyz", degrees=True)
+                    with open(args.state_file, "w") as f:
+                        # ENU: x=east, y=north, z=up. Shim wants n,e,alt,yaw.
+                        f.write(f"{sim.state.position[1]:.3f} "
+                                f"{sim.state.position[0]:.3f} "
+                                f"{sim.state.position[2]:.3f} "
+                                f"{yaw_pub:.2f}\n")
+                except OSError:
+                    pass
+
             if now - last_log >= args.log_period_s:
                 last_log = now
                 p_ = sim.state.position
                 v_ = sim.state.linear_velocity
-                # Roll/pitch/yaw from quaternion (world-frame yaw).
                 rot = Rotation.from_quat(sim.state.attitude)
                 roll, pitch, yaw = rot.as_euler("xyz", degrees=True)
                 stats = backend.stats()
