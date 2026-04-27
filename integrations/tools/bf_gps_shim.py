@@ -363,6 +363,11 @@ class ClientForwarder:
             buf.extend(chunk)
             self._consume_requests(buf)
         self._stop.set()
+        # Wake the up_to_down thread (it's blocked on up.recv).
+        try:
+            self.up.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
 
     def _consume_requests(self, buf: bytearray) -> None:
         """Pull complete `$M<` frames out of buf; intercept MSP_RAW_GPS,
@@ -428,6 +433,11 @@ class ClientForwarder:
             except OSError:
                 break
         self._stop.set()
+        # Wake the down_to_up thread (it's blocked on down.recv).
+        try:
+            self.down.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
 
 
 # ── Main ───────────────────────────────────────────────────────────────────

@@ -105,9 +105,9 @@ class MissionConfig:
     # Map geometry — half-side of the square map in meters.
     # The four corners are at (±half, ±half) from home in (north, east) m.
     # Tune to your actual map bounds.
-    map_half_size_m: float = 80.0
-    cruise_alt_m: float = 75.0
-    circle_radius_m: float = 50.0
+    map_half_size_m: float = 30.0           # tightened from 80 for sim_loop
+    cruise_alt_m: float = 15.0              # was 75; achievable in <60s w/ Iris sim
+    circle_radius_m: float = 15.0
     circle_period_s: float = 30.0          # one full circle in 30 s
     arrival_radius_m: float = 5.0          # waypoint reached when within
     descent_arrival_alt_m: float = 1.0     # consider "landed" below this
@@ -115,7 +115,7 @@ class MissionConfig:
     # Phase timings.
     handover_duration_s: float = 10.0
     los_duration_s: float = 7.0
-    climb_timeout_s: float = 30.0
+    climb_timeout_s: float = 60.0           # was 30; Iris sim climbs ~0.5 m/s
     leg_timeout_s: float = 60.0
     descent_timeout_s: float = 90.0    # hard exit if alt never reaches floor
 
@@ -134,13 +134,15 @@ class MissionConfig:
     pitch_max_us: float = 200.0
     yaw_align_threshold_deg: float = 25.0
 
-    # Iris hover throttle = 1300 µs to match `sitl/defaults.txt`'s
-    # `gps_rescue_throttle_hover = 1300`. Setting this to 1500 like a
-    # generic hover would make the climb-throttle saturate at the
-    # 1700 hard cap, blowing past 75 m on the way up.
-    throttle_hover_us: int = 1300
+    # Iris hover throttle ≈ 1640 PWM in our sim_loop physics (verified
+    # empirically by flight_profile.py running clean climb/hover). Was
+    # 1300 — that targeted a `gps_rescue_throttle_hover` config that we
+    # never actually applied (BF 4.5.1 renamed/removed the setting), so
+    # at 1300 PWM Iris sank during CLIMB and the X-pattern silently
+    # completed on the ground.
+    throttle_hover_us: int = 1640
     throttle_kp_per_m: float = 6.0
-    throttle_max_offset: int = 300
+    throttle_max_offset: int = 200          # cap above hover (1640+200=1840)
 
 
 # ── Map waypoints ──────────────────────────────────────────────────────────
@@ -486,10 +488,10 @@ def main() -> int:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--bf-host", default="127.0.0.1")
     p.add_argument("--bf-port", type=int, default=5761)
-    p.add_argument("--map-half-size", type=float, default=80.0,
-                   help="Half-side of the square map in meters (default 80 = 160x160 m).")
-    p.add_argument("--cruise-alt", type=float, default=75.0)
-    p.add_argument("--circle-radius", type=float, default=50.0)
+    p.add_argument("--map-half-size", type=float, default=30.0,
+                   help="Half-side of the square map in meters (default 30 = 60x60 m).")
+    p.add_argument("--cruise-alt", type=float, default=15.0)
+    p.add_argument("--circle-radius", type=float, default=15.0)
     p.add_argument("--rate-hz", type=float, default=50.0)
     p.add_argument("--log-level", default="INFO")
     args = p.parse_args()
@@ -525,8 +527,8 @@ def main() -> int:
             if mission.should_send_msp():
                 rc = mission.compute_rc(snap, t0)
                 # Clamp throttle hard to keep crashes survivable in case of
-                # a controller blowup. Same hard cap as the racer_companion.
-                rc[msp.CH_THROTTLE] = min(rc[msp.CH_THROTTLE], 1700)
+                # a controller blowup. 1840 = hover (1640) + max_offset (200).
+                rc[msp.CH_THROTTLE] = min(rc[msp.CH_THROTTLE], 1840)
                 fc.send_overrides(rc)
             elapsed = time.monotonic() - t0
             if elapsed < loop_dt:
