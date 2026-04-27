@@ -73,12 +73,27 @@ PWM_MIN = 1000
 PWM_MID = 1500
 PWM_MAX = 2000
 
+# MSP_SET_RAW_RC wire-order slot indices for BF's default rcmap "AETR".
+# This is BF's slot order, NOT companion-side `msp.CH_*` constants —
+# those are mis-mapped (CH_THROTTLE=3 / CH_YAW=2 puts throttle at the
+# yaw slot on the wire, which is task #42 in the project tracker).
+# Writing to BF wire slots directly here avoids that bug for the demo.
+SLOT_ROLL = 0
+SLOT_PITCH = 1
+SLOT_THROTTLE = 2
+SLOT_YAW = 3
+SLOT_AUX1 = 4
+SLOT_AUX2 = 5
+SLOT_AUX3 = 6
+SLOT_AUX4 = 7
+
 
 # ── Phase enum ─────────────────────────────────────────────────────────────
 
 
 class Phase(Enum):
     INIT = "INIT"
+    ARM = "ARM"
     CLIMB = "CLIMB"
     X_LEG_1 = "X_LEG_1"               # SW → NE
     X_LEG_2 = "X_LEG_2"               # NE → SE
@@ -113,6 +128,7 @@ class MissionConfig:
     descent_arrival_alt_m: float = 1.0     # consider "landed" below this
 
     # Phase timings.
+    arm_duration_s: float = 2.0             # idle throttle + AUX1 high to arm
     handover_duration_s: float = 10.0
     los_duration_s: float = 7.0
     climb_timeout_s: float = 60.0           # was 30; Iris sim climbs ~0.5 m/s
@@ -143,6 +159,10 @@ class MissionConfig:
     throttle_hover_us: int = 1640
     throttle_kp_per_m: float = 6.0
     throttle_max_offset: int = 200          # cap above hover (1640+200=1840)
+    # Idle throttle during ARM phase. Must be < BF's min_check (1050)
+    # so the THROTTLE arming-disable flag clears before AUX1 high
+    # triggers the ARM box.
+    throttle_idle_us: int = 950
 
 
 # ── Map waypoints ──────────────────────────────────────────────────────────
@@ -222,6 +242,8 @@ class Mission:
         """Advance the state machine. snap is a TelemetrySnapshot."""
         if self.phase == Phase.INIT:
             self._update_init(snap, now)
+        elif self.phase == Phase.ARM:
+            self._update_arm(snap, now)
         elif self.phase == Phase.CLIMB:
             self._update_climb(snap, now)
         elif self.phase in (Phase.X_LEG_1, Phase.X_LEG_2, Phase.X_LEG_3,
@@ -240,21 +262,45 @@ class Mission:
 
     def should_send_msp(self) -> bool:
         """During HANDOVER and LOS_TEST we deliberately stop sending MSP
-        so the pilot (or BF's failsafe) takes over."""
+        so the pilot (or BF's failsafe) takes over.
+        We DO send during INIT — BF's RX_FAILSAFE bit latches if it ever
+        sees no RC for ~1 s, and INIT can take that long while waiting
+        for the first GPS frame. compute_rc() returns AUX1 low + idle
+        throttle in INIT, so the arm box won't engage; we're just
+        keeping the RC stream alive."""
         return self.phase not in (
-            Phase.INIT, Phase.HANDOVER, Phase.LOS_TEST, Phase.DONE,
+            Phase.HANDOVER, Phase.LOS_TEST, Phase.DONE,
         )
 
     def compute_rc(self, snap, now: float) -> list[int]:
-        """RC values for MSP_SET_RAW_RC. 8 channels; channels 5-8 stay at
-        midpoint (the companion's mask=15 only covers channels 1-4 anyway)."""
+        """RC values for MSP_SET_RAW_RC. We set AUX1 high to arm (no
+        pilot radio in SITL). Channels 6-8 (AUX2-4) at PWM_MIN to match
+        flight_profile.py's known-good pattern — having them at PWM_MID
+        was empirically blocking BF from arming through the shim, even
+        though no `aux` bindings exist for AUX2-4 in defaults.txt."""
         rc = [PWM_MID] * 8
+        rc[SLOT_AUX2] = PWM_MIN
+        rc[SLOT_AUX3] = PWM_MIN
+        rc[SLOT_AUX4] = PWM_MIN
+        # Default: idle throttle. Only flying phases push it up. Pre-flight
+        # ticks (no GPS yet, ARM phase) MUST send idle so BF's THROTTLE
+        # arming-disable bit clears — otherwise high throttle + AUX1 high
+        # together latch ARM_SWITCH and BF refuses to arm.
+        rc[SLOT_THROTTLE] = self.cfg.throttle_idle_us
+        # AUX1: low during INIT (don't engage ARM box yet), high once we
+        # transition to ARM and onward. Without this gate, BF sees AUX1
+        # high BEFORE we've started the arm sequence and may latch
+        # ARM_SWITCH on the inevitable first-tick high-throttle blip.
+        rc[SLOT_AUX1] = PWM_MIN if self.phase == Phase.INIT else PWM_MAX
         if not snap.gps or not snap.gps.fix:
-            # No GPS — hover throttle, level sticks. Better than nothing.
-            rc[msp.CH_THROTTLE] = self.cfg.throttle_hover_us
             return rc
 
-        if self.phase == Phase.CLIMB:
+        if self.phase == Phase.ARM:
+            # Idle throttle + AUX1 already high (set above). Hold for
+            # arm_duration_s — BF clears THROTTLE arming-disable bit
+            # (throttle below min_check) and ARM box engages.
+            rc[SLOT_THROTTLE] = self.cfg.throttle_idle_us
+        elif self.phase == Phase.CLIMB:
             self._compute_climb_rc(rc, snap)
         elif self.phase in (Phase.X_LEG_1, Phase.X_LEG_2, Phase.X_LEG_3,
                             Phase.TO_CENTER, Phase.LANDING_APPROACH):
@@ -278,46 +324,64 @@ class Mission:
     # ── Per-phase update logic ──────────────────────────────────────────
 
     def _update_init(self, snap, now: float) -> None:
-        if snap.gps and snap.gps.fix and snap.gps.num_sat >= self.cfg.min_satellites:
-            # Lock in home + corner waypoints from the first good GPS.
+        # Wait for GPS fix AND altitude — without altitude, home.alt_m falls
+        # back to 0 and rel_alt comparisons become wrong (BF's MSP_ALTITUDE
+        # is offset from boot baseline so absolute alt at z=0 sim might
+        # report 100m, instantly satisfying CLIMB→X_LEG_1).
+        if (snap.gps and snap.gps.fix
+                and snap.gps.num_sat >= self.cfg.min_satellites
+                and snap.altitude is not None):
             self.home = Waypoint(
                 lat_deg=snap.gps.lat_deg,
                 lon_deg=snap.gps.lon_deg,
-                alt_m=snap.altitude.alt_cm / 100.0 if snap.altitude else 0.0,
+                alt_m=snap.altitude.alt_cm / 100.0,
                 label="HOME",
             )
             self.corners = build_corners(
                 self.home.lat_deg, self.home.lon_deg,
                 self.cfg.map_half_size_m, self.cfg.cruise_alt_m,
             )
-            log.info("[mission] HOME locked: lat=%.7f lon=%.7f sats=%d",
-                     self.home.lat_deg, self.home.lon_deg, snap.gps.num_sat)
+            log.info("[mission] HOME locked: lat=%.7f lon=%.7f alt=%.2fm sats=%d",
+                     self.home.lat_deg, self.home.lon_deg, self.home.alt_m,
+                     snap.gps.num_sat)
             for k, w in self.corners.items():
-                log.info("  %s: lat=%.7f lon=%.7f alt=%.1f", k,
+                log.info("  %s: lat=%.7f lon=%.7f alt=%.1f (rel)", k,
                          w.lat_deg, w.lon_deg, w.alt_m)
+            self._enter(Phase.ARM, now)
+
+    def _update_arm(self, snap, now: float) -> None:
+        if self._phase_elapsed(now) >= self.cfg.arm_duration_s:
             self._enter(Phase.CLIMB, now)
 
+    def _rel_alt(self, snap) -> float | None:
+        """Altitude above HOME (where INIT captured baseline). BF's MSP_ALTITUDE
+        is offset from BF's barometric baseline at boot, which doesn't match
+        our absolute home, so all alt comparisons must be relative."""
+        if not snap.altitude or self.home is None:
+            return None
+        return (snap.altitude.alt_cm / 100.0) - self.home.alt_m
+
     def _update_climb(self, snap, now: float) -> None:
-        if not snap.altitude:
+        rel = self._rel_alt(snap)
+        if rel is None:
             return
-        alt_m = snap.altitude.alt_cm / 100.0
-        if alt_m >= self.cfg.cruise_alt_m * 0.95:
+        if rel >= self.cfg.cruise_alt_m * 0.95:
             self._enter(Phase.X_LEG_1, now)
         elif self._phase_elapsed(now) > self.cfg.climb_timeout_s:
             # Refuse to advance if the drone never lifted off — would
             # silently complete the mission on the ground. Operator must
             # tune throttle_hover_us if this fires.
-            if alt_m < self.cfg.min_climb_alt_m:
+            if rel < self.cfg.min_climb_alt_m:
                 log.error(
-                    "[mission] CLIMB timeout AND altitude %.2fm < %.1fm — "
+                    "[mission] CLIMB timeout AND rel_alt %.2fm < %.1fm — "
                     "the drone never lifted off. Likely throttle_hover_us "
-                    "wrong. Aborting.", alt_m, self.cfg.min_climb_alt_m,
+                    "wrong. Aborting.", rel, self.cfg.min_climb_alt_m,
                 )
                 self._enter(Phase.DONE, now)
                 return
             log.warning(
-                "[mission] CLIMB timeout but airborne at %.1fm — proceeding",
-                alt_m,
+                "[mission] CLIMB timeout but airborne at rel_alt=%.1fm — proceeding",
+                rel,
             )
             self._enter(Phase.X_LEG_1, now)
 
@@ -370,21 +434,21 @@ class Mission:
             self._enter(Phase.LANDING_APPROACH, now)
 
     def _update_descent(self, snap, now: float) -> None:
-        if snap.altitude:
-            alt_m = snap.altitude.alt_cm / 100.0
-            if alt_m <= self.cfg.descent_arrival_alt_m:
-                log.info("[mission] LANDED at NE corner (alt=%.2fm)", alt_m)
+        rel = self._rel_alt(snap)
+        if rel is not None:
+            if rel <= self.cfg.descent_arrival_alt_m:
+                log.info("[mission] LANDED at NE corner (rel_alt=%.2fm)", rel)
                 self._enter(Phase.DONE, now)
                 return
         # Hard timeout — without it the drone could oscillate around the
         # arrival-alt threshold forever (noisy altitude estimate + idle
         # throttle).
         if self._phase_elapsed(now) > self.cfg.descent_timeout_s:
-            alt_str = f"{snap.altitude.alt_cm / 100.0:.2f}" if snap.altitude else "?"
+            rel_str = f"{rel:.2f}" if rel is not None else "?"
             log.warning(
-                "[mission] DESCENT timeout after %.0fs (alt=%sm). "
+                "[mission] DESCENT timeout after %.0fs (rel_alt=%sm). "
                 "Forcing DONE; check throttle tuning + position hold.",
-                self.cfg.descent_timeout_s, alt_str,
+                self.cfg.descent_timeout_s, rel_str,
             )
             self._enter(Phase.DONE, now)
 
@@ -423,21 +487,21 @@ class Mission:
     # ── RC computation ─────────────────────────────────────────────────
 
     def _compute_climb_rc(self, rc: list[int], snap) -> None:
-        """Throttle up; sticks centered."""
-        if not snap.altitude:
-            rc[msp.CH_THROTTLE] = self.cfg.throttle_hover_us + 80
+        """Throttle up; sticks centered. Altitude judged relative to HOME."""
+        rel = self._rel_alt(snap)
+        if rel is None:
+            rc[SLOT_THROTTLE] = self.cfg.throttle_hover_us + 80
             return
-        alt_m = snap.altitude.alt_cm / 100.0
-        err_m = self.cfg.cruise_alt_m - alt_m
+        err_m = self.cfg.cruise_alt_m - rel
         # Above hover by enough to climb.
         offset = max(40, min(self.cfg.throttle_max_offset,
                              int(self.cfg.throttle_kp_per_m * err_m)))
-        rc[msp.CH_THROTTLE] = self.cfg.throttle_hover_us + offset
+        rc[SLOT_THROTTLE] = self.cfg.throttle_hover_us + offset
 
     def _compute_waypoint_rc(self, rc: list[int], snap, target: Waypoint) -> None:
         """Bearing-track + altitude hold to the target."""
         if not snap.gps or not snap.gps.fix:
-            rc[msp.CH_THROTTLE] = self.cfg.throttle_hover_us
+            rc[SLOT_THROTTLE] = self.cfg.throttle_hover_us
             return
         distance = nav.haversine_m(
             snap.gps.lat_deg, snap.gps.lon_deg,
@@ -452,23 +516,25 @@ class Mission:
         # Yaw control.
         yaw_delta = max(-self.cfg.yaw_max_us,
                         min(self.cfg.yaw_max_us, self.cfg.yaw_kp * h_err))
-        rc[msp.CH_YAW] = int(round(PWM_MID + yaw_delta))
+        rc[SLOT_YAW] = int(round(PWM_MID + yaw_delta))
         # Pitch only when aligned.
         if abs(h_err) < self.cfg.yaw_align_threshold_deg:
             forward = max(0.0, min(self.cfg.pitch_max_us,
                                    self.cfg.pitch_kp_per_m * distance))
-            rc[msp.CH_PITCH] = int(round(PWM_MID + forward))
+            rc[SLOT_PITCH] = int(round(PWM_MID + forward))
         else:
-            rc[msp.CH_PITCH] = PWM_MID
-        # Altitude hold via throttle.
-        if snap.altitude:
-            err_m = target.alt_m - (snap.altitude.alt_cm / 100.0)
+            rc[SLOT_PITCH] = PWM_MID
+        # Altitude hold via throttle. target.alt_m is the cruise altitude
+        # (a relative value). Compare against rel_alt, not absolute alt.
+        rel = self._rel_alt(snap)
+        if rel is not None:
+            err_m = target.alt_m - rel
             t_offset = max(-self.cfg.throttle_max_offset,
                            min(self.cfg.throttle_max_offset,
                                int(self.cfg.throttle_kp_per_m * err_m)))
-            rc[msp.CH_THROTTLE] = self.cfg.throttle_hover_us + t_offset
+            rc[SLOT_THROTTLE] = self.cfg.throttle_hover_us + t_offset
         else:
-            rc[msp.CH_THROTTLE] = self.cfg.throttle_hover_us
+            rc[SLOT_THROTTLE] = self.cfg.throttle_hover_us
 
     def _compute_descent_rc(self, rc: list[int], snap) -> None:
         """Slow throttle reduction at NE corner — let gravity bring it down."""
@@ -476,7 +542,7 @@ class Mission:
         if "NE" in self.corners:
             self._compute_waypoint_rc(rc, snap, self.corners["NE"])
         # Then bias throttle below hover so it sinks.
-        rc[msp.CH_THROTTLE] = max(
+        rc[SLOT_THROTTLE] = max(
             PWM_MIN, self.cfg.throttle_hover_us - 100,
         )
 
@@ -519,17 +585,29 @@ def main() -> int:
     )
 
     loop_dt = 1.0 / cfg.loop_hz
+    last_rc_log = 0.0
     try:
         while mission.phase != Phase.DONE:
             t0 = time.monotonic()
-            snap = fc.tick(t0)
-            mission.update(snap, t0)
-            if mission.should_send_msp():
+            # SEND RC FIRST, then poll telemetry. Reverse order (telem
+            # first) caused BF to never arm when the RC arrived behind a
+            # backlog of 6 telemetry requests. Sending RC at the head of
+            # each tick keeps it the freshest packet in BF's queue.
+            snap = mission.last_snap if hasattr(mission, "last_snap") else None
+            if snap is not None and mission.should_send_msp():
                 rc = mission.compute_rc(snap, t0)
-                # Clamp throttle hard to keep crashes survivable in case of
-                # a controller blowup. 1840 = hover (1640) + max_offset (200).
-                rc[msp.CH_THROTTLE] = min(rc[msp.CH_THROTTLE], 1840)
+                rc[SLOT_THROTTLE] = min(rc[SLOT_THROTTLE], 1840)
                 fc.send_overrides(rc)
+                if t0 - last_rc_log > 1.0:
+                    last_rc_log = t0
+                    rel = (snap.altitude.alt_cm / 100.0 - mission.home.alt_m) if (
+                        snap.altitude and mission.home) else None
+                    log.info("[rc] %s rc=%s rel_alt=%s",
+                             mission.phase.value, rc,
+                             f"{rel:.2f}m" if rel is not None else "?")
+            new_snap = fc.tick(t0)
+            mission.last_snap = new_snap
+            mission.update(new_snap, t0)
             elapsed = time.monotonic() - t0
             if elapsed < loop_dt:
                 time.sleep(loop_dt - elapsed)

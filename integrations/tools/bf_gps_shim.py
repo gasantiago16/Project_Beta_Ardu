@@ -107,9 +107,18 @@ class ShimConfig:
 
 
 class PositionIntegrator:
-    """Maintains its own MSP TCP connection to BF and integrates horizontal
-    position from BF's reported attitude. Vertical alt is read straight from
-    MSP_ALTITUDE.
+    """Integrates horizontal position from BF's reported attitude.
+
+    PASSIVE — no MSP connection. The shim's `_up_to_down` pump pipes
+    every parsed MSP response through `feed()`. We extract MSP_ATTITUDE
+    + MSP_ALTITUDE values to drive the position model.
+
+    Why passive: BF SITL routes MSP responses to whichever client most
+    recently sent the request (or its TCP server has some other
+    multi-client quirk). An integrator with its own MSP connection
+    stole replies meant for the forwarded client, causing
+    mission_demo / flight_profile to never receive their MSP_ALTITUDE
+    responses → controllers misbehave on stale alt=0.
 
     BF angle conventions (verified against probe_attitude.py):
       yaw   — 0..360, 0 = north, 90 = east  (heading)
@@ -128,26 +137,35 @@ class PositionIntegrator:
         self._yaw_deg = 0.0
         self._roll_deg = 0.0
         self._pitch_deg = 0.0
+        # Latest sensor reads (set by feed(), consumed by _loop()).
+        self._latest_yaw_deg = 0.0
+        self._latest_pitch_deg = 0.0
+        self._latest_roll_deg = 0.0
+        self._latest_alt_cm = 0
         self._stop = threading.Event()
-        self._sock: socket.socket | None = None
-        self._buf = bytearray()
 
     def start(self) -> None:
-        self._sock = socket.create_connection(
-            (self.cfg.bf_host, self.cfg.bf_port), timeout=5.0,
-        )
-        self._sock.setblocking(False)
         threading.Thread(
             target=self._loop, daemon=True, name="bf-pos-integrator",
         ).start()
 
     def stop(self) -> None:
         self._stop.set()
-        if self._sock is not None:
-            try:
-                self._sock.close()
-            except OSError:
-                pass
+
+    def feed(self, cmd: int, payload: bytes) -> None:
+        """Called by the shim's u→d pump for each parsed MSP response.
+        Updates the latest cached attitude/altitude — _loop() integrates
+        on its own clock."""
+        if cmd == MSP_ATTITUDE and len(payload) >= 6:
+            rx10, py10, yh = struct.unpack("<hhh", payload[:6])
+            with self._lock:
+                self._latest_roll_deg = rx10 / 10.0
+                self._latest_pitch_deg = py10 / 10.0
+                self._latest_yaw_deg = float(yh)
+        elif cmd == MSP_ALTITUDE and len(payload) >= 6:
+            alt_cm, _vario = struct.unpack("<ih", payload[:6])
+            with self._lock:
+                self._latest_alt_cm = alt_cm
 
     def snapshot(self) -> dict:
         with self._lock:
@@ -171,41 +189,20 @@ class PositionIntegrator:
 
     def _loop(self) -> None:
         dt_target = 1.0 / self.cfg.integrate_hz
-        last_poll = 0.0
         last_log = time.monotonic()
         last_t = time.monotonic()
-        roll = pitch = yaw = 0.0
-        alt_cm = 0
 
         while not self._stop.is_set():
             now = time.monotonic()
             actual_dt = max(0.0, now - last_t)
             last_t = now
 
-            # Poll BF for attitude + altitude.
-            if now - last_poll >= self.cfg.poll_period_s:
-                try:
-                    self._sock.sendall(_msp_request(MSP_ATTITUDE))
-                    self._sock.sendall(_msp_request(MSP_ALTITUDE))
-                    last_poll = now
-                except OSError:
-                    pass
-
-            # Drain whatever arrived.
-            try:
-                chunk = self._sock.recv(4096)
-                if chunk:
-                    self._buf.extend(chunk)
-            except (BlockingIOError, OSError):
-                pass
-            for cmd, payload in self._drain_frames():
-                if cmd == MSP_ATTITUDE and len(payload) >= 6:
-                    rx10, py10, yh = struct.unpack("<hhh", payload[:6])
-                    roll = rx10 / 10.0
-                    pitch = py10 / 10.0
-                    yaw = float(yh)
-                elif cmd == MSP_ALTITUDE and len(payload) >= 6:
-                    alt_cm, _vario = struct.unpack("<ih", payload[:6])
+            # Snapshot latest sensor reads.
+            with self._lock:
+                yaw = self._latest_yaw_deg
+                pitch = self._latest_pitch_deg
+                roll = self._latest_roll_deg
+                alt_cm = self._latest_alt_cm
 
             # Integrate horizontal motion. Pitch < 0 (nose down) → forward.
             yaw_rad = math.radians(yaw)
@@ -215,7 +212,6 @@ class PositionIntegrator:
             a_body_rt = GRAVITY * math.tan(roll_rad)
             cy = math.cos(yaw_rad)
             sy = math.sin(yaw_rad)
-            # body forward = +N when yaw=0; body right = +E when yaw=0
             a_n = a_body_fwd * cy - a_body_rt * sy
             a_e = a_body_fwd * sy + a_body_rt * cy
 
@@ -246,25 +242,6 @@ class PositionIntegrator:
             sleep_for = dt_target - (time.monotonic() - now)
             if sleep_for > 0:
                 time.sleep(sleep_for)
-
-    def _drain_frames(self):
-        out = []
-        while True:
-            i = self._buf.find(MSP_HEADER_RESP)
-            if i < 0:
-                if len(self._buf) > 256:
-                    del self._buf[:-3]
-                return out
-            if len(self._buf) < i + 5:
-                return out
-            size = self._buf[i + 3]
-            cmd = self._buf[i + 4]
-            total = i + 5 + size + 1
-            if len(self._buf) < total:
-                return out
-            payload = bytes(self._buf[i + 5: i + 5 + size])
-            del self._buf[:total]
-            out.append((cmd, payload))
 
 
 # ── MSP_RAW_GPS synth ──────────────────────────────────────────────────────
@@ -363,11 +340,6 @@ class ClientForwarder:
             buf.extend(chunk)
             self._consume_requests(buf)
         self._stop.set()
-        # Wake the up_to_down thread (it's blocked on up.recv).
-        try:
-            self.up.shutdown(socket.SHUT_RDWR)
-        except OSError:
-            pass
 
     def _consume_requests(self, buf: bytearray) -> None:
         """Pull complete `$M<` frames out of buf; intercept MSP_RAW_GPS,
@@ -421,6 +393,10 @@ class ClientForwarder:
                     return
 
     def _up_to_down(self) -> None:
+        """Forward BF responses to the client verbatim. Also tee parsed
+        MSP_ATTITUDE / MSP_ALTITUDE values into the integrator so it
+        can run its position model without a separate MSP connection."""
+        observe_buf = bytearray()
         while not self._stop.is_set():
             try:
                 chunk = self.up.recv(4096)
@@ -428,16 +404,38 @@ class ClientForwarder:
                 break
             if not chunk:
                 break
+            # Forward bytes immediately (don't gate forwarding on parse).
             try:
                 self.down.sendall(chunk)
             except OSError:
                 break
+            # Parse-and-observe in a side buffer for the integrator.
+            observe_buf.extend(chunk)
+            self._observe_responses(observe_buf)
         self._stop.set()
-        # Wake the down_to_up thread (it's blocked on down.recv).
-        try:
-            self.down.shutdown(socket.SHUT_RDWR)
-        except OSError:
-            pass
+
+    def _observe_responses(self, buf: bytearray) -> None:
+        """Pull complete `$M>` frames out of buf, feed each one to the
+        integrator. Bytes are NOT consumed from the wire (already
+        forwarded) — `buf` is a separate observation buffer."""
+        while True:
+            i = buf.find(MSP_HEADER_RESP)
+            if i < 0:
+                if len(buf) > 4096:
+                    del buf[:-256]
+                return
+            if i > 0:
+                del buf[:i]
+            if len(buf) < 6:
+                return
+            size = buf[3]
+            cmd = buf[4]
+            total = 5 + size + 1
+            if len(buf) < total:
+                return
+            payload = bytes(buf[5: 5 + size])
+            del buf[:total]
+            self.integrator.feed(cmd, payload)
 
 
 # ── Main ───────────────────────────────────────────────────────────────────
@@ -473,14 +471,9 @@ def main() -> int:
     )
 
     integrator = PositionIntegrator(cfg)
-    log.info("starting BF state poller (attitude + altitude @ %.0f Hz)...",
-             1.0 / cfg.poll_period_s)
-    try:
-        integrator.start()
-    except OSError as e:
-        log.error("FATAL: cannot reach BF at %s:%d (%s). "
-                  "Is the SITL container up?", cfg.bf_host, cfg.bf_port, e)
-        return 2
+    log.info("starting position integrator (passive — observes "
+             "attitude/altitude piped from forwarded clients)")
+    integrator.start()
 
     listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
