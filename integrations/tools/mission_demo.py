@@ -128,6 +128,11 @@ class MissionConfig:
     descent_arrival_alt_m: float = 1.0     # consider "landed" below this
 
     # Phase timings.
+    init_settle_s: float = 5.0              # AUX1=LOW dwell before ARM phase;
+                                             # BF needs to observe arm-box OFF
+                                             # for several cycles before an
+                                             # OFF→ON transition will arm.
+                                             # Empirically <1s = BF won't arm.
     arm_duration_s: float = 2.0             # idle throttle + AUX1 high to arm
     handover_duration_s: float = 10.0
     los_duration_s: float = 7.0
@@ -328,9 +333,17 @@ class Mission:
         # back to 0 and rel_alt comparisons become wrong (BF's MSP_ALTITUDE
         # is offset from boot baseline so absolute alt at z=0 sim might
         # report 100m, instantly satisfying CLIMB→X_LEG_1).
-        if (snap.gps and snap.gps.fix
-                and snap.gps.num_sat >= self.cfg.min_satellites
-                and snap.altitude is not None):
+        ready = (snap.gps and snap.gps.fix
+                 and snap.gps.num_sat >= self.cfg.min_satellites
+                 and snap.altitude is not None)
+        if not ready:
+            return
+        # Capture HOME on first ready frame, then dwell here with AUX1=LOW
+        # for init_settle_s before transitioning to ARM. BF's arm box uses
+        # an edge-trigger — it needs to observe AUX1 OFF for multiple
+        # cycles before recognizing an OFF→ON transition. With sub-second
+        # INIT, BF misses the edge and never arms.
+        if self.home is None:
             self.home = Waypoint(
                 lat_deg=snap.gps.lat_deg,
                 lon_deg=snap.gps.lon_deg,
@@ -341,12 +354,14 @@ class Mission:
                 self.home.lat_deg, self.home.lon_deg,
                 self.cfg.map_half_size_m, self.cfg.cruise_alt_m,
             )
-            log.info("[mission] HOME locked: lat=%.7f lon=%.7f alt=%.2fm sats=%d",
+            log.info("[mission] HOME locked: lat=%.7f lon=%.7f alt=%.2fm sats=%d "
+                     "(settling %.1fs with AUX1=LOW before ARM)",
                      self.home.lat_deg, self.home.lon_deg, self.home.alt_m,
-                     snap.gps.num_sat)
+                     snap.gps.num_sat, self.cfg.init_settle_s)
             for k, w in self.corners.items():
                 log.info("  %s: lat=%.7f lon=%.7f alt=%.1f (rel)", k,
                          w.lat_deg, w.lon_deg, w.alt_m)
+        if self._phase_elapsed(now) >= self.cfg.init_settle_s:
             self._enter(Phase.ARM, now)
 
     def _update_arm(self, snap, now: float) -> None:
@@ -584,6 +599,73 @@ def main() -> int:
         telemetry_period_s=1.0 / 10.0,
     )
 
+    # Reach down into the adapter and grab its underlying socket so we
+    # can write RC bytes directly. Going through fc.send_overrides
+    # causes BF to flag RX_FAILSAFE+BAD_RX_RECOVERY+ARM_SWITCH within
+    # a few seconds (verified with the arming-flag decoder); raw
+    # writes on the same socket — same exact MSP frame bytes — keep
+    # BF arm-able. Likely some buffering/timing nuance in the adapter
+    # path that BF's RX freshness logic doesn't tolerate.
+    import struct as _struct
+    _rc_socket = fc._client.ser.sock
+
+    def send_rc_raw(channels: list[int]) -> None:
+        payload = b"".join(_struct.pack("<H", c) for c in channels)
+        pkt = bytes([len(payload), msp.MSP_SET_RAW_RC]) + payload
+        chk = 0
+        for b in pkt:
+            chk ^= b
+        try:
+            _rc_socket.sendall(b"$M<" + pkt + bytes([chk & 0xFF]))
+        except OSError:
+            pass
+
+    # Wrap MspClient.poll to also extract MSP_STATUS_EX armingDisableFlags
+    # so we can see in real-time why BF is/isn't arming.
+    import struct as _struct
+    _orig_handle_frame = fc._handle_frame
+    fc._last_arming_flags = -1
+    fc._last_flight_modes = -1
+    fc._last_arming_log = 0.0
+    def _handle_with_arming(cmd, payload, frame_now):
+        _orig_handle_frame(cmd, payload, frame_now)
+        if cmd == msp.MSP_STATUS_EX and len(payload) >= 21:
+            # BF 4.5.1 MSP_STATUS_EX layout (verified empirically by
+            # walking byte-by-byte in tests/probe_status.py):
+            #   [0-1] cycleTime u16
+            #   [2-3] i2cErrCount u16
+            #   [4-5] sensors u16  (ACC|BARO|MAG|GPS|RNG|GYRO bitmap)
+            #   [6-9] flightModeFlags u32
+            #   [10] pidProfileIndex u8
+            #   [11-12] avgSystemLoadPct u16
+            #   [13] rateProfileIndex u8
+            #   [14-15] (some short u16 — possibly task/MSP version count)
+            #   [16] armingDisableFlagsCount u8 (= 26)
+            #   [17-20] armingDisableFlags u32  ← THE bits we care about
+            try:
+                fm = _struct.unpack_from("<I", payload, 6)[0]
+                arm_flags = _struct.unpack_from("<I", payload, 17)[0]
+                fc._last_arming_flags = arm_flags
+                fc._last_flight_modes = fm
+                fc._last_status_payload = payload.hex()
+            except _struct.error:
+                pass
+    fc._handle_frame = _handle_with_arming
+
+    def _decode_arming(flags: int) -> str:
+        names = [
+            "NO_GYRO", "FAILSAFE", "RX_FAILSAFE", "BAD_RX_RECOVERY",
+            "BOXFAILSAFE", "RUNAWAY_TAKEOFF", "CRASH_DETECTED",
+            "THROTTLE", "ANGLE", "BOOT_GRACE_TIME", "NOPREARM",
+            "LOAD", "CALIBRATING", "CLI", "CMS_MENU", "BST",
+            "MSP", "PARALYZE", "GPS", "RESC", "RPMFILTER",
+            "REBOOT_REQUIRED", "DSHOT_BITBANG", "ACC_CALIBRATION",
+            "MOTOR_PROTOCOL", "ARM_SWITCH",
+        ]
+        if flags == 0:
+            return "ARMABLE"
+        return ",".join(n for i, n in enumerate(names) if flags & (1 << i))
+
     loop_dt = 1.0 / cfg.loop_hz
     last_rc_log = 0.0
     try:
@@ -597,14 +679,20 @@ def main() -> int:
             if snap is not None and mission.should_send_msp():
                 rc = mission.compute_rc(snap, t0)
                 rc[SLOT_THROTTLE] = min(rc[SLOT_THROTTLE], 1840)
-                fc.send_overrides(rc)
+                send_rc_raw(rc)
                 if t0 - last_rc_log > 1.0:
                     last_rc_log = t0
                     rel = (snap.altitude.alt_cm / 100.0 - mission.home.alt_m) if (
                         snap.altitude and mission.home) else None
-                    log.info("[rc] %s rc=%s rel_alt=%s",
-                             mission.phase.value, rc,
-                             f"{rel:.2f}m" if rel is not None else "?")
+                    arm_flag_str = _decode_arming(fc._last_arming_flags) if fc._last_arming_flags >= 0 else "?"
+                    payload_hex = getattr(fc, "_last_status_payload", "?")
+                    bf_rc = snap.rc if snap.rc else None
+                    log.info(
+                        "[rc] %s sent=%s bf_sees=%s arm=0x%x[%s] fm=0x%x",
+                        mission.phase.value, rc,
+                        bf_rc, max(0, fc._last_arming_flags), arm_flag_str,
+                        max(0, fc._last_flight_modes),
+                    )
             new_snap = fc.tick(t0)
             mission.last_snap = new_snap
             mission.update(new_snap, t0)
