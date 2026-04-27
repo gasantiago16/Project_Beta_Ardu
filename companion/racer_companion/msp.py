@@ -26,10 +26,19 @@ MSP_BOXNAMES = 116
 MSP_STATUS_EX = 150
 MSP_SET_RAW_RC = 200
 
+# MSP_SET_RAW_RC slot indices for BF's default rcmap "AETR".
+# `rcmap = "AETR"` means MSP slot 0 → A (Roll), slot 1 → E (Pitch),
+# slot 2 → T (Throttle), slot 3 → R (Yaw). The companion writes
+# rc[CH_THROTTLE] = throttle PWM, which must land in slot 2 to reach
+# rcData[Throttle] on the FC. PRIOR to this fix CH_THROTTLE was 3
+# and CH_YAW was 2, swapping the two on the wire — every armed flight
+# would have got throttle on the yaw stick. Verified empirically against
+# BF SITL via the `bf_diag` tool: with these constants, BF's MSP_RC
+# echo reports rcData[Throttle] = our throttle value.
 CH_ROLL = 0
 CH_PITCH = 1
-CH_YAW = 2
-CH_THROTTLE = 3
+CH_THROTTLE = 2
+CH_YAW = 3
 CH_AUX1 = 4
 CH_AUX2 = 5
 CH_AUX3 = 6

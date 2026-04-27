@@ -74,10 +74,10 @@ PWM_MID = 1500
 PWM_MAX = 2000
 
 # MSP_SET_RAW_RC wire-order slot indices for BF's default rcmap "AETR".
-# This is BF's slot order, NOT companion-side `msp.CH_*` constants —
-# those are mis-mapped (CH_THROTTLE=3 / CH_YAW=2 puts throttle at the
-# yaw slot on the wire, which is task #42 in the project tracker).
-# Writing to BF wire slots directly here avoids that bug for the demo.
+# After task #42 fixed the swap in companion/racer_companion/msp.py,
+# these are identical to `msp.CH_*`. Kept as local names for clarity
+# in this demo (it's nice to see "SLOT_THROTTLE" right next to the
+# wire format).
 SLOT_ROLL = 0
 SLOT_PITCH = 1
 SLOT_THROTTLE = 2
