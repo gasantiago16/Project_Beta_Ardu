@@ -329,20 +329,19 @@ class Mission:
     # ── Per-phase update logic ──────────────────────────────────────────
 
     def _update_init(self, snap, now: float) -> None:
-        # Wait for GPS fix AND altitude — without altitude, home.alt_m falls
-        # back to 0 and rel_alt comparisons become wrong (BF's MSP_ALTITUDE
-        # is offset from boot baseline so absolute alt at z=0 sim might
-        # report 100m, instantly satisfying CLIMB→X_LEG_1).
+        # Wait for GPS fix AND altitude AND ARMABLE flags. The
+        # arming-flags check is the real-flight best-practice "wait for
+        # OSD to say ARMABLE before flipping the switch" — applies
+        # equally to sim. Without it we'd see ARM_SWITCH (bit 25)
+        # latch when AUX1 transitions LOW→HIGH while ANY other
+        # disable bit is still set (BOOT_GRACE_TIME, CALIBRATING,
+        # NO_ACC_CAL, etc.). Once latched, AUX1 has to drop below
+        # 1700 to clear it — which mission_demo never does.
         ready = (snap.gps and snap.gps.fix
                  and snap.gps.num_sat >= self.cfg.min_satellites
                  and snap.altitude is not None)
         if not ready:
             return
-        # Capture HOME on first ready frame, then dwell here with AUX1=LOW
-        # for init_settle_s before transitioning to ARM. BF's arm box uses
-        # an edge-trigger — it needs to observe AUX1 OFF for multiple
-        # cycles before recognizing an OFF→ON transition. With sub-second
-        # INIT, BF misses the edge and never arms.
         if self.home is None:
             self.home = Waypoint(
                 lat_deg=snap.gps.lat_deg,
@@ -354,13 +353,26 @@ class Mission:
                 self.home.lat_deg, self.home.lon_deg,
                 self.cfg.map_half_size_m, self.cfg.cruise_alt_m,
             )
-            log.info("[mission] HOME locked: lat=%.7f lon=%.7f alt=%.2fm sats=%d "
-                     "(settling %.1fs with AUX1=LOW before ARM)",
+            log.info("[mission] HOME locked: lat=%.7f lon=%.7f alt=%.2fm sats=%d",
                      self.home.lat_deg, self.home.lon_deg, self.home.alt_m,
-                     snap.gps.num_sat, self.cfg.init_settle_s)
+                     snap.gps.num_sat)
             for k, w in self.corners.items():
                 log.info("  %s: lat=%.7f lon=%.7f alt=%.1f (rel)", k,
                          w.lat_deg, w.lon_deg, w.alt_m)
+        # Wait for ARMABLE (armingDisableFlags == 0). The main loop
+        # populates `self.last_arming_flags` from MSP_STATUS_EX every
+        # tick. -1 means we haven't received a STATUS_EX yet.
+        flags = getattr(self, "last_arming_flags", -1)
+        if flags != 0:
+            # Periodic log so the user can see what's blocking arming.
+            elapsed = self._phase_elapsed(now)
+            if int(elapsed) % 5 == 0 and elapsed - getattr(
+                self, "_last_armable_log", -10.0,
+            ) > 4.0:
+                self._last_armable_log = elapsed
+                log.info("[mission] waiting for ARMABLE (arm_flags=0x%x, "
+                         "elapsed=%.1fs)", max(0, flags), elapsed)
+            return
         if self._phase_elapsed(now) >= self.cfg.init_settle_s:
             self._enter(Phase.ARM, now)
 
@@ -599,27 +611,6 @@ def main() -> int:
         telemetry_period_s=1.0 / 10.0,
     )
 
-    # Reach down into the adapter and grab its underlying socket so we
-    # can write RC bytes directly. Going through fc.send_overrides
-    # causes BF to flag RX_FAILSAFE+BAD_RX_RECOVERY+ARM_SWITCH within
-    # a few seconds (verified with the arming-flag decoder); raw
-    # writes on the same socket — same exact MSP frame bytes — keep
-    # BF arm-able. Likely some buffering/timing nuance in the adapter
-    # path that BF's RX freshness logic doesn't tolerate.
-    import struct as _struct
-    _rc_socket = fc._client.ser.sock
-
-    def send_rc_raw(channels: list[int]) -> None:
-        payload = b"".join(_struct.pack("<H", c) for c in channels)
-        pkt = bytes([len(payload), msp.MSP_SET_RAW_RC]) + payload
-        chk = 0
-        for b in pkt:
-            chk ^= b
-        try:
-            _rc_socket.sendall(b"$M<" + pkt + bytes([chk & 0xFF]))
-        except OSError:
-            pass
-
     # Wrap MspClient.poll to also extract MSP_STATUS_EX armingDisableFlags
     # so we can see in real-time why BF is/isn't arming.
     import struct as _struct
@@ -679,22 +670,25 @@ def main() -> int:
             if snap is not None and mission.should_send_msp():
                 rc = mission.compute_rc(snap, t0)
                 rc[SLOT_THROTTLE] = min(rc[SLOT_THROTTLE], 1840)
-                send_rc_raw(rc)
+                fc.send_overrides(rc)
                 if t0 - last_rc_log > 1.0:
                     last_rc_log = t0
                     rel = (snap.altitude.alt_cm / 100.0 - mission.home.alt_m) if (
                         snap.altitude and mission.home) else None
                     arm_flag_str = _decode_arming(fc._last_arming_flags) if fc._last_arming_flags >= 0 else "?"
                     payload_hex = getattr(fc, "_last_status_payload", "?")
-                    bf_rc = snap.rc if snap.rc else None
+                    rel = (snap.altitude.alt_cm / 100.0 - mission.home.alt_m) if (
+                        snap.altitude and mission.home) else None
                     log.info(
-                        "[rc] %s sent=%s bf_sees=%s arm=0x%x[%s] fm=0x%x",
-                        mission.phase.value, rc,
-                        bf_rc, max(0, fc._last_arming_flags), arm_flag_str,
+                        "[rc] %s thr=%d aux1=%d rel_alt=%s arm=0x%x[%s] fm=0x%x",
+                        mission.phase.value, rc[SLOT_THROTTLE], rc[SLOT_AUX1],
+                        f"{rel:.2f}m" if rel is not None else "?",
+                        max(0, fc._last_arming_flags), arm_flag_str,
                         max(0, fc._last_flight_modes),
                     )
             new_snap = fc.tick(t0)
             mission.last_snap = new_snap
+            mission.last_arming_flags = fc._last_arming_flags
             mission.update(new_snap, t0)
             elapsed = time.monotonic() - t0
             if elapsed < loop_dt:

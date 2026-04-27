@@ -53,6 +53,28 @@ MSP_HEADER_RESP = b"$M>"
 MSP_RAW_GPS = 106
 MSP_ATTITUDE = 108
 MSP_ALTITUDE = 109
+MSP_RC = 105
+MSP_ANALOG = 110
+MSP_BOXNAMES = 116
+MSP_STATUS_EX = 150
+
+# Commands the shim caches from BF and serves to clients from a local
+# cache. The racer_companion's BetaflightAdapter polls these 6 cmds at
+# 10 Hz (every 100 ms). At that rate, BF SITL's UDP/MSP thread interaction
+# stalls — sim_loop's motor-packet RX freezes, ARM_SWITCH latches,
+# RX_FAILSAFE flaps. By caching, the companion sees its production-rate
+# responses while BF only handles ~2 Hz queries from the shim's refresh
+# thread. Real BF firmware on STM32 doesn't have this thread coupling,
+# so the cache is a sim-only mechanism that keeps the companion code
+# path identical between sim and real flight.
+CACHED_CMDS: frozenset[int] = frozenset({
+    MSP_ATTITUDE,
+    MSP_ALTITUDE,
+    MSP_RC,
+    MSP_ANALOG,
+    MSP_BOXNAMES,
+    MSP_STATUS_EX,
+})
 
 # ── Earth model ────────────────────────────────────────────────────────────
 
@@ -101,6 +123,47 @@ class ShimConfig:
     poll_period_s: float = 0.05         # 20 Hz BF state poll
     horizontal_drag: float = 0.5        # 1/s — Iris-ish settling time
     log_period_s: float = 5.0
+
+    # MSP response cache refresh rate. The shim sends queries to BF at
+    # this rate to keep the cache warm. Companion polls at 10 Hz are
+    # served entirely from cache without hitting BF. Setting this too
+    # high reproduces the BF SITL stall (>3 Hz starts to be risky on
+    # this Windows/Docker setup).
+    cache_refresh_hz: float = 2.0
+
+
+# ── MSP response cache ─────────────────────────────────────────────────────
+
+
+class ResponseCache:
+    """Per-cmd cached MSP response frames (full $M> ... bytes).
+
+    Populated by the forwarder's u→d pump as responses arrive from BF.
+    Consumed by the d→u pump when the client asks for a CACHED_CMDS
+    cmd — we return the cached frame directly instead of forwarding
+    the request to BF. This keeps BF's MSP load at the shim's refresh
+    rate (~2 Hz) regardless of how fast the client polls (10 Hz).
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._frames: dict[int, bytes] = {}
+        self._timestamps: dict[int, float] = {}
+
+    def store(self, cmd: int, frame: bytes) -> None:
+        now = time.monotonic()
+        with self._lock:
+            self._frames[cmd] = frame
+            self._timestamps[cmd] = now
+
+    def get(self, cmd: int) -> bytes | None:
+        with self._lock:
+            return self._frames.get(cmd)
+
+    def age(self, cmd: int) -> float:
+        with self._lock:
+            t = self._timestamps.get(cmd)
+        return float("inf") if t is None else time.monotonic() - t
 
 
 # ── Position integrator ────────────────────────────────────────────────────
@@ -280,9 +343,13 @@ def synthesize_raw_gps(integrator: PositionIntegrator, cfg: ShimConfig) -> bytes
 
 
 class ClientForwarder:
-    """One mission_demo connection ⇄ one BF connection. Two pump threads:
-    downstream→upstream (with MSP_RAW_GPS interception) + upstream→downstream
-    (transparent passthrough)."""
+    """One mission_demo connection ⇄ one BF connection. Three threads:
+    - d→u: downstream→upstream, intercepts MSP_RAW_GPS (synth) and any
+      cmd in CACHED_CMDS (served from cache) — never forwards those.
+    - u→d: upstream→downstream, parses each $M> frame; cached cmds go
+      to cache (absorbed), others forwarded.
+    - cache_refresh: at cache_refresh_hz, sends queries upstream so the
+      cache stays warm regardless of client polling rate."""
 
     def __init__(
         self,
@@ -296,6 +363,7 @@ class ClientForwarder:
         self.integrator = integrator
         self.cfg = cfg
         self.up: socket.socket | None = None
+        self.cache = ResponseCache()
         self._stop = threading.Event()
 
     def run(self) -> None:
@@ -310,16 +378,21 @@ class ClientForwarder:
             except OSError:
                 pass
             return
-        log.info("[fwd %s] connected → BF %s:%d",
-                 self.addr, self.cfg.bf_host, self.cfg.bf_port)
+        log.info("[fwd %s] connected → BF %s:%d (cache refresh %.1f Hz)",
+                 self.addr, self.cfg.bf_host, self.cfg.bf_port,
+                 self.cfg.cache_refresh_hz)
         t1 = threading.Thread(target=self._down_to_up, daemon=True,
                               name=f"d2u-{self.addr[1]}")
         t2 = threading.Thread(target=self._up_to_down, daemon=True,
                               name=f"u2d-{self.addr[1]}")
+        t3 = threading.Thread(target=self._cache_refresh_loop, daemon=True,
+                              name=f"refresh-{self.addr[1]}")
         t1.start()
         t2.start()
+        t3.start()
         t1.join()
         t2.join()
+        # cache thread is daemon and will exit when sockets close
         for s in (self.up, self.down):
             try:
                 s.close()
@@ -378,6 +451,7 @@ class ClientForwarder:
             frame = bytes(buf[:total])
             del buf[:total]
             if cmd == MSP_RAW_GPS:
+                # Synthesized from integrator — never reaches BF.
                 try:
                     self.down.sendall(synthesize_raw_gps(
                         self.integrator, self.cfg,
@@ -385,7 +459,21 @@ class ClientForwarder:
                 except OSError:
                     self._stop.set()
                     return
+            elif cmd in CACHED_CMDS:
+                # Serve from cache. The refresh thread keeps it warm.
+                # Cache miss = silently drop the request — client will
+                # retry on its next tick (~20-100 ms later) by which
+                # time the refresh thread has populated the cache.
+                cached = self.cache.get(cmd)
+                if cached is not None:
+                    try:
+                        self.down.sendall(cached)
+                    except OSError:
+                        self._stop.set()
+                        return
             else:
+                # Non-cached cmd (e.g., MSP_API_VERSION, MSP_FC_VARIANT,
+                # MSP_BOARD_INFO, MSP_SET_RAW_RC). Forward to BF as usual.
                 try:
                     self.up.sendall(frame)
                 except OSError:
@@ -393,10 +481,14 @@ class ClientForwarder:
                     return
 
     def _up_to_down(self) -> None:
-        """Forward BF responses to the client verbatim. Also tee parsed
-        MSP_ATTITUDE / MSP_ALTITUDE values into the integrator so it
-        can run its position model without a separate MSP connection."""
-        observe_buf = bytearray()
+        """Read BF responses, parse into frames, dispatch each frame:
+          - cached cmds → store in cache, feed integrator, ABSORB
+            (don't forward to client; the d→u pump serves from cache).
+          - non-cached cmds → forward verbatim to client.
+        We must parse before forwarding so we can decide per-frame; we
+        can't just stream bytes through like the original implementation.
+        """
+        buf = bytearray()
         while not self._stop.is_set():
             try:
                 chunk = self.up.recv(4096)
@@ -404,27 +496,22 @@ class ClientForwarder:
                 break
             if not chunk:
                 break
-            # Forward bytes immediately (don't gate forwarding on parse).
-            try:
-                self.down.sendall(chunk)
-            except OSError:
-                break
-            # Parse-and-observe in a side buffer for the integrator.
-            observe_buf.extend(chunk)
-            self._observe_responses(observe_buf)
+            buf.extend(chunk)
+            self._dispatch_responses(buf)
         self._stop.set()
 
-    def _observe_responses(self, buf: bytearray) -> None:
-        """Pull complete `$M>` frames out of buf, feed each one to the
-        integrator. Bytes are NOT consumed from the wire (already
-        forwarded) — `buf` is a separate observation buffer."""
+    def _dispatch_responses(self, buf: bytearray) -> None:
+        """Pull complete $M> frames out of buf and dispatch."""
         while True:
             i = buf.find(MSP_HEADER_RESP)
             if i < 0:
+                # No header. Drop oldest bytes if buffer balloons (shouldn't
+                # happen — BF only sends well-formed frames).
                 if len(buf) > 4096:
                     del buf[:-256]
                 return
             if i > 0:
+                # Pre-header bytes — drop. (BF doesn't send free-form text.)
                 del buf[:i]
             if len(buf) < 6:
                 return
@@ -433,9 +520,50 @@ class ClientForwarder:
             total = 5 + size + 1
             if len(buf) < total:
                 return
+            frame = bytes(buf[:total])
             payload = bytes(buf[5: 5 + size])
             del buf[:total]
+
+            # Always feed integrator (passive position model).
             self.integrator.feed(cmd, payload)
+
+            if cmd in CACHED_CMDS:
+                # Refresh-thread or client-triggered query response —
+                # park in cache, don't forward.
+                self.cache.store(cmd, frame)
+            else:
+                # One-off response (e.g., MSP_API_VERSION) — forward.
+                try:
+                    self.down.sendall(frame)
+                except OSError:
+                    self._stop.set()
+                    return
+
+    def _cache_refresh_loop(self) -> None:
+        """Background: poll BF for cacheable cmds at cache_refresh_hz.
+        BF responds, _dispatch_responses absorbs into cache. Companion
+        polls (10 Hz) are served entirely from cache without BF ever
+        seeing them — the entire point of the cache layer."""
+        period = 1.0 / max(0.1, self.cfg.cache_refresh_hz)
+        cmds = list(CACHED_CMDS)
+        while not self._stop.is_set():
+            for cmd in cmds:
+                if self.up is None:
+                    return
+                try:
+                    self.up.sendall(_msp_request(cmd))
+                except OSError:
+                    return
+                # Tiny gap between burst queries so BF can interleave
+                # processing without backlog.
+                time.sleep(0.005)
+            # Sleep to next refresh tick, in small chunks so we exit
+            # promptly when the forwarder shuts down.
+            slept = 0.0
+            while slept < period and not self._stop.is_set():
+                step = min(0.05, period - slept)
+                time.sleep(step)
+                slept += step
 
 
 # ── Main ───────────────────────────────────────────────────────────────────
