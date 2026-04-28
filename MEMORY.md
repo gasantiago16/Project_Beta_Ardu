@@ -49,6 +49,39 @@ project state.
   - Skipped: lift-out-of-snap-gate optimization (premature) and
     BF-restart-reconnect logic (not blocking)
 
+### v0.8.2 — recovery flow tuned (Apr 28 evening)
+
+After v0.8.1's failed `failsafe_throttle_low_delay` experiment, two
+local tweaks to `mission_demo.compute_rc()`'s recovery flow gave
+real per-tick wins without changing BF settings:
+
+1. **`RECOVERY_HOLD_S` 0.6 → 1.5 s.** mission11 vs mission10:
+   recovery count dropped 53 → 5 over 240 s. Longer HOLD lets BF
+   fully settle internal failsafe state before normal flow resumes,
+   so the relatch doesn't fire 1.5-3 s later.
+2. **Two-subphase HOLD** (new `RECOVERY_HOLD_IDLE_S = 0.3 s`). First
+   0.3 s of HOLD keeps throttle idle (preserves the THROTTLE bit
+   clear at the LOW→HIGH AUX1 transition). Remaining 1.2 s raises
+   throttle to hover so the drone doesn't free-fall through HOLD.
+   AUX1 stays HIGH the whole HOLD — no new transition, no fresh
+   ARM_SWITCH-latch opportunity. mission12: 3 recoveries / 240 s,
+   peak altitudes 36-40 m (drone stays high through cycles).
+
+Both changes shipped in `integrations/tools/mission_demo.py` plus
+two new tests in `test_mission_demo.py::TestArmSwitchRecovery`
+(`test_hold_idle_subphase_keeps_throttle_low`,
+`test_hold_hover_subphase_keeps_drone_at_altitude`).
+
+**New bug exposed by the fix:** mission12's altitude trace shows
+40 m peak / -16 m trough oscillation with ~50 s period during
+normal flight (independent of the recovery flow). Lateral progress
+is still limited because the wild altitude swings starve the X_LEG
+yaw/pitch controller. Tracked as TODO.md item 9. Likely root cause:
+mission_demo's CLIMB altitude controller has `max(40, ...)` clamp
+that makes it climb-only — once above target, no descent thrust.
+The X_LEG waypoint controller does have bidirectional altitude
+control but apparently can't catch up.
+
 ### v0.8.1 follow-up — Apr 28 PM cautionary tale
 
 Same-day attempt to close the residual bit-1 FAILSAFE pulse via

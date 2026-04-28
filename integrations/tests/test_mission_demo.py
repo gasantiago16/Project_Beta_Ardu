@@ -427,22 +427,36 @@ class TestArmSwitchRecovery(unittest.TestCase):
         rc = self.m.compute_rc(self.snap, now=1.0)
         self.assertEqual(rc[md.SLOT_AUX1], md.PWM_MIN)
 
-    def test_hold_stage_keeps_throttle_idle_after_low(self):
-        # After the LOW stage clears the latch (flags go to 0), we
-        # must hold idle throttle while AUX1 returns HIGH — otherwise
-        # BF re-evaluates arming with throttle high and re-latches
-        # ARM_SWITCH.
-        self.m.phase = md.Phase.LANDING_APPROACH  # would compute thr=1731
+    def test_hold_idle_subphase_keeps_throttle_low(self):
+        # First RECOVERY_HOLD_IDLE_S of HOLD must keep throttle idle
+        # so the LOW→HIGH AUX1 transition lands with THROTTLE bit
+        # clear (else BF re-latches ARM_SWITCH on the edge).
+        self.m.phase = md.Phase.LANDING_APPROACH
         self.m.last_arming_flags = self.ARM_SWITCH
-        # Tick 1: LOW stage — schedules hold.
-        self.m.compute_rc(self.snap, now=1.0)
-        # Tick 2: latch cleared (flags=0), but hold is active.
+        self.m.compute_rc(self.snap, now=1.0)  # LOW; schedules hold
         self.m.last_arming_flags = 0
-        rc = self.m.compute_rc(self.snap, now=1.1)  # within hold window
+        # 0.1 s into HOLD — well inside the idle sub-phase.
+        rc = self.m.compute_rc(self.snap, now=1.1)
         self.assertEqual(rc[md.SLOT_AUX1], md.PWM_MAX,
-                         "AUX1 must rise so the LOW→HIGH transition happens")
+                         "AUX1 must rise so the LOW→HIGH edge fires")
         self.assertEqual(rc[md.SLOT_THROTTLE], self.m.cfg.throttle_idle_us,
-                         "throttle must stay idle during HOLD or BF re-latches")
+                         "throttle must stay idle in idle sub-phase")
+
+    def test_hold_hover_subphase_keeps_drone_at_altitude(self):
+        # After the idle sub-phase, throttle goes to hover so the
+        # drone doesn't free-fall through the rest of HOLD. AUX1 has
+        # already settled HIGH, so raising throttle here doesn't
+        # create a new LOW→HIGH AUX1 edge.
+        self.m.phase = md.Phase.LANDING_APPROACH
+        self.m.last_arming_flags = self.ARM_SWITCH
+        self.m.compute_rc(self.snap, now=1.0)  # LOW; schedules hold
+        self.m.last_arming_flags = 0
+        # Past idle sub-phase, still inside hold window.
+        idle_end = 1.0 + self.m.RECOVERY_HOLD_IDLE_S + 0.1
+        rc = self.m.compute_rc(self.snap, now=idle_end)
+        self.assertEqual(rc[md.SLOT_AUX1], md.PWM_MAX)
+        self.assertEqual(rc[md.SLOT_THROTTLE], self.m.cfg.throttle_hover_us,
+                         "throttle must be at hover in hover sub-phase")
 
     def test_normal_flow_resumes_after_hold_window_expires(self):
         # Once RECOVERY_HOLD_S elapses with clean flags, per-phase

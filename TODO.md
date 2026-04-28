@@ -10,15 +10,13 @@ the context behind each.
    mission7 has zero `[rc]` log hits with RX_FAILSAFE, vs mission6's
    42. See MEMORY.md v0.8.
 
-2. **Bit-1 FAILSAFE / ARM_SWITCH cycles every ~3-10 s in CLIMB and
-   X_LEG phases, source unknown.** The dual-write fix for #1 closed
-   the chronic RX_FAILSAFE (bit-2) path but exposed a separate
-   trigger that fires roughly every 3-10 s and re-latches ARM_SWITCH
-   via `flags=0x2000082` (FAILSAFE+THROTTLE+ARM_SWITCH) or
-   `flags=0x2000080` (THROTTLE+ARM_SWITCH). Mission7 happened to
-   land on the loose end (10 s spacing → drone reached CIRCLE_2);
-   mission10's 53 recoveries / 240 s shows typical behavior is
-   tighter and the drone crashes during CIRCLE_1.
+2. ~~Bit-1 FAILSAFE / ARM_SWITCH cycles every ~3-10 s.~~ **MITIGATED
+   Apr 28 evening.** Two-subphase HOLD with hover throttle in the
+   second half (mission_demo.RECOVERY_HOLD_IDLE_S=0.3,
+   RECOVERY_HOLD_S=1.5) dropped recovery count from 53 (mission10)
+   to 3 (mission12) over 240 s. The trigger is still there but
+   fires far less often AND no longer costs full altitude per cycle.
+   Root cause of the bit-1 trigger remains unknown — see TODO #9.
    - **Apr 28 PM failed experiment** (preserved as cautionary tale):
      hypothesis was `failsafe_throttle_low_delay` (default 100, in
      0.1 s units = 10 s) matched the cadence, so bumping to 200
@@ -81,6 +79,28 @@ the context behind each.
    shim/BF ever returns stale arming flags from cache, the recovery
    branch could fire on outdated data. Today's runs trust the cache
    refresh thread (2 Hz) — adequate but not bullet-proof.
+
+9. **Altitude oscillation: mission12 peaks at 36-40 m / dips to
+   -16 m on a ~50 s period during normal flight.** Surfaced once
+   the recovery-flow tuning (TODO #2 mitigation) stopped dragging
+   the drone to the ground every 5 s. Cruise alt is 15 m; we're
+   getting 25 m amplitude oscillations. Lateral controller starves
+   because the X_LEG pitch trigger (`abs(h_err) <
+   yaw_align_threshold_deg = 25°`) can't settle while altitude
+   swings are this wild.
+   - **Suspected root cause**: `mission_demo._compute_climb_rc` uses
+     `offset = max(40, min(throttle_max_offset, kp * err_m))` —
+     i.e., minimum 40 µs above hover even when above target. Climb-
+     only, no descent thrust during CLIMB phase.
+   - **Less suspected but possible**: X_LEG's bidirectional altitude
+     controller (`_compute_waypoint_rc`) has `throttle_kp_per_m =
+     6.0` — could be too aggressive, overshooting on each correction.
+   - **Diagnostic recipe**: add per-tick (alt, throttle, phase) log
+     to mission_demo and walk through one oscillation cycle.
+   - **Cheap fixes to try**: (a) replace the `max(40, ...)` clamp
+     in `_compute_climb_rc` with `max(-throttle_max_offset, ...)`
+     so it can descend; (b) lower `throttle_kp_per_m` from 6.0 to
+     2.0; (c) add a small dead-band around target altitude.
 
 ## Not doing — rejected ideas
 

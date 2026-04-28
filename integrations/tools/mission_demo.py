@@ -282,8 +282,23 @@ class Mission:
         # we loop forever. Hold idle throttle (with AUX1 HIGH) for this
         # long after exiting the LOW stage so BF sees a clean ARMABLE
         # at the LOW→HIGH edge.
+        # Apr 28 evening: bumped from 0.6 to 1.5 s. mission10 showed the
+        # relatch fires 1.5-3 s after a clean HOLD ends, suggesting BF
+        # needs longer to fully settle internal failsafe state.
+        # mission11: confirmed 1.5 s drops recovery cadence from 53 →
+        # 5 over 240 s. But idle throttle for 1.5 s = drone free-falls
+        # ~13 m per recovery, so legs still don't reach corners.
         self._recovery_hold_until = 0.0
-        self.RECOVERY_HOLD_S = 0.6
+        self.RECOVERY_HOLD_S = 1.5
+        # Within the HOLD stage, the FIRST `RECOVERY_HOLD_IDLE_S` lets
+        # the AUX1 LOW→HIGH transition (at LOW→HOLD boundary) land with
+        # throttle idle so the THROTTLE bit (set when throttle >
+        # min_check) doesn't immediately re-latch ARM_SWITCH. After
+        # that brief idle window, raise throttle to hover so the drone
+        # doesn't free-fall through the rest of HOLD. AUX1 stays HIGH
+        # the whole time — no new transition, no new latch
+        # opportunity.
+        self.RECOVERY_HOLD_IDLE_S = 0.3
 
     # ── Public interface ────────────────────────────────────────────────
 
@@ -384,18 +399,36 @@ class Mission:
                 )
             return rc
         if in_flying_phase and now < self._recovery_hold_until:
-            # HOLD stage. AUX1 is already HIGH (set above), but we
-            # override throttle to idle so the LOW→HIGH transition
-            # lands in ARMABLE. Skip per-phase compute.
-            rc[SLOT_THROTTLE] = self.cfg.throttle_idle_us
+            # HOLD stage. AUX1 is already HIGH (set above). Two
+            # sub-phases:
+            #   1. IDLE (first RECOVERY_HOLD_IDLE_S): keep throttle
+            #      idle so the LOW→HIGH AUX1 transition that just
+            #      happened (at LOW→HOLD boundary) lands with all
+            #      disable bits clear. THROTTLE bit was clear in LOW
+            #      stage; staying idle preserves that.
+            #   2. HOVER (remaining time): raise throttle to hover so
+            #      the drone doesn't free-fall through the rest of
+            #      HOLD. AUX1 stays HIGH continuously, so no new
+            #      transition; THROTTLE bit may set as throttle goes
+            #      high but no LOW→HIGH AUX1 edge means no fresh
+            #      ARM_SWITCH latching opportunity.
+            hold_remaining = self._recovery_hold_until - now
+            in_idle_subphase = (
+                hold_remaining > self.RECOVERY_HOLD_S - self.RECOVERY_HOLD_IDLE_S
+            )
+            if in_idle_subphase:
+                rc[SLOT_THROTTLE] = self.cfg.throttle_idle_us
+                subphase = "idle"
+            else:
+                rc[SLOT_THROTTLE] = self.cfg.throttle_hover_us
+                subphase = "hover"
             self._recovery_ticks += 1
             if now - self._recovery_logged_at >= 0.5:
                 self._recovery_logged_at = now
                 log.warning(
-                    "[recover] HOLD stage — flags=0x%x phase=%s "
-                    "(idle %.2fs remaining)",
-                    flags, self.phase.value,
-                    self._recovery_hold_until - now,
+                    "[recover] HOLD stage (%s) — flags=0x%x phase=%s "
+                    "(%.2fs remaining)",
+                    subphase, flags, self.phase.value, hold_remaining,
                 )
             return rc
         if not snap.gps or not snap.gps.fix:
