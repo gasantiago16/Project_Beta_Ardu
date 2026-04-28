@@ -114,28 +114,60 @@ boots from a baked eeprom.
 - Real fix would be patching BF SITL's UDP thread init, ~half-day of C
   debugging in `betaflight/src/main/target/SITL/sitl.c`.
 
-### 2. ARM_SWITCH latch (real-flight-relevant)
+### 2. ARM_SWITCH latch (real-flight-relevant — FIXED Apr 27)
 
-**Symptom**: even when BF arms briefly, `arm_flags=0x2000088`
-(BAD_RX_RECOVERY + THROTTLE + ARM_SWITCH bit 25) latches a few seconds
-in. `fm` flips from `0x3` (ARM+ANGLE) to `0x2` (ANGLE only) — BF
-disarmed itself.
+**Symptom**: 30 s into a recorded flight, `arm_flags` flips from `0x0`
+(ARMABLE) to `0x200008e` (FAILSAFE+RX_FAILSAFE+BAD_RX_RECOVERY+
+THROTTLE+ARM_SWITCH bit 25). `fm` drops from `0x3` (ARM+ANGLE) to
+`0x2` (ANGLE only). Drone disarms mid-mission and falls.
 
-**Root cause**: BF's `ARMING_DISABLED_ARM_SWITCH` (bit 25) sets when
-AUX1 transitions LOW→HIGH while *any* other disable bit is momentarily
-set. Once latched, AUX1 must drop below 1700 to clear it. Mission_demo
-holds AUX1 high for the entire flight, so it stays latched.
+**Root cause** (two-part):
+1. BF SITL on Windows-Docker periodically gaps the MSP RC stream long
+   enough to trip BF's bad-rx state machine. Two contributing causes
+   were patched:
+   - `bf_gps_shim` had two threads writing to the upstream socket
+     without synchronization. Concurrent `socket.sendall` calls can
+     interleave bytes mid-MSP-frame, corrupting `MSP_SET_RAW_RC` —
+     which BF treats as a bad RX frame, eventually tripping
+     `BAD_RX_RECOVERY` (bit 3). Fixed in `pegasus-bridge` by
+     serializing all up/down sendall through per-socket locks.
+   - With `failsafe_delay = 200` (20 s) in `defaults.txt`, the
+     longer-period RX_FAILSAFE no longer fires on transient gaps,
+     just on sustained ones.
+2. Once any disable bit set with AUX1 high, `ARM_SWITCH` (bit 25)
+   latches and persists until AUX1 goes LOW. The naive recovery
+   (drop AUX1 → raise AUX1) loops forever because at the LOW→HIGH
+   transition BF re-evaluates arming with throttle still high
+   (THROTTLE bit 7 set) and ARM_SWITCH re-latches. `mission_demo`
+   now does a **two-stage recovery**:
+   - **LOW stage**: AUX1=LOW + idle throttle until `(ARM_SWITCH |
+     BAD_RX_RECOVERY)` clears.
+   - **HOLD stage**: AUX1=HIGH + idle throttle for `RECOVERY_HOLD_S
+     = 0.6 s` so BF lands the LOW→HIGH transition on a clean
+     ARMABLE state.
 
-**Real-flight impact**: this bites real flight too. A pilot's "wait
-for ARMABLE on OSD before flipping the arm switch" is the manual
-version. Mission_demo now has a **wait-for-armable** check in INIT
-that polls `armingDisableFlags` and only transitions INIT→ARM when
-flags == 0. Once that fires, the LOW→HIGH transition won't latch.
+**Empirical**: `mission4.png` shows the drone surviving 6 latches over
+220 s, completing all four X-legs (timing out short of corners
+because each recovery costs altitude), before landing in TO_CENTER.
+
+**Real-flight impact**: the hardware path doesn't exhibit the shim
+corruption (no Python relay) so the underlying RX-loss trigger is
+sim-only. The recovery flow itself is real-flight-applicable as a
+fallback against any transient that latches ARM_SWITCH mid-mission.
+Mission_demo also still has the **wait-for-armable** check in INIT
+that prevents the latch from happening on the *initial* arm.
 
 **SITL gotcha**: BF SITL's `BOOT_GRACE_TIME` runs on sim-time, not
-wall-time. If sim_loop hasn't started feeding FDM, sim time doesn't
-advance, BOOT_GRACE_TIME never clears, mission_demo waits forever in
-INIT. Make sure sim_loop is running before mission_demo connects.
+wall-time. If sim_loop / Pegasus hasn't started feeding FDM, sim
+time doesn't advance, BOOT_GRACE_TIME never clears, mission_demo
+waits forever in INIT. Make sure FDM is flowing before mission_demo
+connects.
+
+**Open**: even with the lock + recovery, BF still trips full failsafe
+every ~18 s during sustained Isaac Sim flight. The 18 s interval
+suggests the shim / Docker / Windows network path has a periodic
+stall longer than ~2 s. Recovery handles it, but it makes legs
+overshoot timeouts. Tracked as a follow-up; not blocking missions.
 
 ### 3. `baro_hardware = VIRTUAL` doesn't actually expose pressure → alt
 

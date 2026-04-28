@@ -23,6 +23,79 @@ project state.
 
 ---
 
+## Snapshot — v0.7 (Apr 27 2026, end-to-end Isaac Sim flight)
+
+| Component | State |
+|---|---|
+| End-to-end mission in Isaac Sim (Iris + BF SITL + Pegasus + shim + mission_demo) | ✅ Flying. `mission4.png` shows climb-X_LEG_1-X_LEG_2-X_LEG_3-TO_CENTER over 220 s, surviving 6 mid-flight latches via two-stage recovery |
+| ARM_SWITCH latch — terminal mid-flight disarm | ✅ Fixed. Two complementary patches landed. |
+| `bf_gps_shim` MSP-frame corruption (concurrent sendall) | ✅ Fixed. Per-socket `threading.Lock`s on `_send_up` / `_send_down`. |
+| `mission_demo` two-stage ARM_SWITCH recovery (LOW + HOLD idle throttle) | ✅ Fixed. `RECOVERY_HOLD_S = 0.6` so LOW→HIGH AUX1 transition lands on clean ARMABLE. |
+| `failsafe_delay = 200` (20 s) in `defaults.txt` | ✅ Bakes via `eeprom_bake` Dockerfile stage; closes the longer-period RX_FAILSAFE path. |
+| Live state-file publishing from orchestrator | ✅ Pegasus's `_latest_state` now writes `n e alt yaw` at 10 Hz so `bf_gps_shim` synthesizes MSP_ALTITUDE/RAW_GPS from real Pegasus physics. |
+| Recurring ~18 s RX-stall under sustained Isaac Sim load | ⚠️ Open. Recovery handles it cleanly, but it makes leg arrivals overshoot timeouts. See TODO.md item 1. |
+| Phase-2 UDP-init flake at SITL boot | ⚠️ Unchanged from v0.6.1; container restart unblocks. |
+
+### v0.7 changes — what landed in this session
+
+- **`integrations/tools/bf_gps_shim.py`** — `ClientForwarder` now has
+  `_up_send_lock` and `_down_send_lock`; all `up.sendall` / `down.sendall`
+  call sites go through `_send_up()` / `_send_down()` helpers which hold
+  the appropriate lock. Two threads (the d→u request forwarder and the
+  cache-refresh poller) used to race on the upstream socket, interleaving
+  bytes mid-MSP-frame and corrupting `MSP_SET_RAW_RC`. BF treated the
+  corrupted frames as bad RX, eventually tripping `BAD_RX_RECOVERY` (bit
+  3) and latching `ARM_SWITCH` while AUX1 was still HIGH.
+- **`integrations/tools/mission_demo.py`** — two-stage recovery in
+  `compute_rc`. When the latch mask `(ARM_SWITCH | BAD_RX_RECOVERY)` is
+  set during a flying phase, **LOW stage** holds AUX1=LOW + idle throttle
+  until the bits clear. Then **HOLD stage** keeps idle throttle (with
+  AUX1=HIGH) for `RECOVERY_HOLD_S = 0.6 s` so BF lands the LOW→HIGH
+  transition on a clean ARMABLE state — preventing the THROTTLE bit from
+  re-latching ARM_SWITCH on the same instant. After the hold expires,
+  per-phase compute resumes.
+- **`integrations/orchestrators/final_world_betaflight.py`** — publishes
+  Pegasus's vehicle state to the same `bf_sim_state.txt` file
+  `bf_gps_shim` reads, at 10 Hz. Replaces the prior workaround where
+  `sim_loop` had to run alongside Pegasus.
+- **`sitl/defaults.txt`** — `set failsafe_delay = 200` (vs 15 default).
+  Changes the long-window RX_FAILSAFE timer to 20 s; combined with the
+  shim lock fix, real RX stalls under 20 s no longer trip the full
+  failsafe. Note: defaults.txt edits require `docker compose build
+  --no-cache betaflight-sitl` because `eeprom_bake` is a build-time stage
+  and Docker layer-cache hits despite source changes.
+- **Tests**: 8 new (`integrations/tests/test_bf_gps_shim.py` × 3,
+  `integrations/tests/test_mission_demo.py::TestArmSwitchRecovery` × 7
+  including HOLD-stage assertions).
+- **Artifacts**: `mission2.png`, `mission3.png`, `mission4.png` in repo
+  root capture the flight progression: latch-fatal → latch-fatal →
+  latch-survivable.
+
+### v0.7 sharp edges
+
+- **`.config_applied` marker is baked into the Docker image** at line 130
+  of `sitl/Dockerfile`, not created at runtime. `defaults.txt` is applied
+  at the `eeprom_bake` build stage, then runtime `start.sh` only re-applies
+  if the marker is missing — which it never is in a built image. Edit
+  `defaults.txt` → must `docker compose build --no-cache betaflight-sitl`.
+  `docker compose restart` alone uses the cached eeprom.
+- **`armingDisableFlags` bit numbers — bit 3 is BAD_RX_RECOVERY, bit 7 is
+  THROTTLE.** Got these reversed in the first patch attempt; the fix
+  needs the real bit-3 constant to detect bad-rx pre-emptively. Reference
+  the names list in `mission_demo.py:_decode_arming` — that order matches
+  BF's `armingDisableFlags_e` enum.
+- **Docker compose `up` after `down` does NOT rebuild eeprom_bake even
+  with `build:` directive** — Docker layer cache bites. Use `--no-cache`
+  on the build command if defaults.txt actually needs to land.
+- **`failsafe_off_delay` is intentionally LEFT AT DEFAULT 10**. Setting
+  it to 200 (matching `failsafe_delay`) breaks arming entirely — BF main
+  loop stalls. Documented in `defaults.txt` already; preserve the asymmetry.
+- **`RECOVERY_HOLD_S = 0.6 s` is empirical.** Shorter values risk BF
+  re-latching on transient throttle bits during the LOW→HIGH transition.
+  Longer values cost more altitude per recovery. 0.6 s held up across
+  6 recoveries in `mission4`; if you see ARM_SWITCH re-latching
+  immediately after HOLD ends, bump to 0.8 s.
+
 ## Snapshot — v0.6.1 (Apr 26 2026, in-Sim flight debug)
 
 | Component | State |
