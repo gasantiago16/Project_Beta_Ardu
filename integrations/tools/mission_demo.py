@@ -255,6 +255,15 @@ class Mission:
         # — diagnostic only; logged so we can spot frequent recoveries.
         self._recovery_ticks = 0
         self._recovery_logged_at = 0.0
+        # Post-recovery idle-throttle hold. After we drop AUX1 LOW to
+        # clear the ARM_SWITCH latch, BF re-evaluates arming the moment
+        # AUX1 returns HIGH. If throttle is above min_check (1050) at
+        # that transition, the THROTTLE bit re-latches ARM_SWITCH and
+        # we loop forever. Hold idle throttle (with AUX1 HIGH) for this
+        # long after exiting the LOW stage so BF sees a clean ARMABLE
+        # at the LOW→HIGH edge.
+        self._recovery_hold_until = 0.0
+        self.RECOVERY_HOLD_S = 0.6
 
     # ── Public interface ────────────────────────────────────────────────
 
@@ -314,39 +323,59 @@ class Mission:
         rc[SLOT_AUX1] = PWM_MIN if self.phase == Phase.INIT else PWM_MAX
 
         # ── ARM_SWITCH-latch recovery (BF SITL artifact) ─────────────
-        # Once we're past INIT/ARM (i.e., the drone has already been
-        # successfully armed and is flying), the only way ARM_SWITCH
-        # (bit 25) gets set is the BF SITL latch path: a transient
-        # BAD_RX_RECOVERY (bit 7) appeared while AUX1 was high, which
-        # latched ARM_SWITCH. Once latched, BF never re-arms unless
-        # AUX1 goes LOW. We do that here — drop AUX1 LOW + idle
-        # throttle + center sticks until BOTH the ARM_SWITCH bit AND
-        # the BAD_RX_RECOVERY bit clear, then the next tick's normal
-        # flow raises AUX1 HIGH again (via line above) and BF re-arms
-        # cleanly. Real BF on STM32 with a real RX never trips this;
-        # the latch is specific to the shim/Docker MSP path.
+        # Past INIT/ARM the only way ARM_SWITCH (bit 25) sets is the
+        # BF SITL latch path: any disable bit appeared while AUX1 was
+        # HIGH. The classical trigger was BAD_RX_RECOVERY (bit 3) from
+        # MSP frame corruption — closed off by the shim send-lock. The
+        # remaining trigger is the THROTTLE bit (bit 7) re-asserting at
+        # the moment AUX1 transitions LOW→HIGH out of recovery: when
+        # AUX1 just rose, BF checks all disable bits, throttle is still
+        # above min_check (1050) for any flying phase, so ARM_SWITCH
+        # re-latches.
+        #
+        # Two-stage recovery solves it:
+        #  1. LOW stage: AUX1=LOW + idle throttle while ARM_SWITCH or
+        #     BAD_RX_RECOVERY is set. Clears the latch.
+        #  2. HOLD stage: AUX1=HIGH + idle throttle for RECOVERY_HOLD_S
+        #     so BF sees the LOW→HIGH transition with throttle below
+        #     min_check, evaluates ARMABLE cleanly, and doesn't re-latch.
+        # After both stages, normal phase logic resumes.
+        # Real BF on STM32 with a real RX doesn't trip this; the latch
+        # is specific to the shim/Docker MSP path on Windows.
         ARM_SWITCH_BIT = 1 << 25
-        BAD_RX_RECOVERY_BIT = 1 << 7
+        BAD_RX_RECOVERY_BIT = 1 << 3
         LATCH_MASK = ARM_SWITCH_BIT | BAD_RX_RECOVERY_BIT
         flags = self.last_arming_flags
-        if (
-            flags > 0
-            and (flags & LATCH_MASK)
-            and self.phase not in (Phase.INIT, Phase.ARM, Phase.DONE)
-        ):
-            # Recovery in progress: AUX1 LOW (clears ARM_SWITCH), idle
-            # throttle (clears THROTTLE), centered sticks (no control
-            # input). Return early — skip the per-phase RC computation
-            # below since we're not actively flying this tick.
+        in_flying_phase = self.phase not in (Phase.INIT, Phase.ARM, Phase.DONE)
+        if flags > 0 and (flags & LATCH_MASK) and in_flying_phase:
+            # LOW stage. Drive AUX1 LOW + idle throttle. Schedule the
+            # subsequent HOLD stage so we don't immediately bounce back
+            # to high-throttle phase logic on the next tick.
             rc[SLOT_AUX1] = PWM_MIN
+            rc[SLOT_THROTTLE] = self.cfg.throttle_idle_us
+            self._recovery_hold_until = now + self.RECOVERY_HOLD_S
+            self._recovery_ticks += 1
+            if now - self._recovery_logged_at >= 0.5:
+                self._recovery_logged_at = now
+                log.warning(
+                    "[recover] LOW stage — flags=0x%x phase=%s "
+                    "(tick %d)",
+                    flags, self.phase.value, self._recovery_ticks,
+                )
+            return rc
+        if in_flying_phase and now < self._recovery_hold_until:
+            # HOLD stage. AUX1 is already HIGH (set above), but we
+            # override throttle to idle so the LOW→HIGH transition
+            # lands in ARMABLE. Skip per-phase compute.
             rc[SLOT_THROTTLE] = self.cfg.throttle_idle_us
             self._recovery_ticks += 1
             if now - self._recovery_logged_at >= 0.5:
                 self._recovery_logged_at = now
                 log.warning(
-                    "[recover] ARM_SWITCH latch — AUX1 LOW (tick %d) "
-                    "flags=0x%x phase=%s",
-                    self._recovery_ticks, flags, self.phase.value,
+                    "[recover] HOLD stage — flags=0x%x phase=%s "
+                    "(idle %.2fs remaining)",
+                    flags, self.phase.value,
+                    self._recovery_hold_until - now,
                 )
             return rc
         if not snap.gps or not snap.gps.fix:

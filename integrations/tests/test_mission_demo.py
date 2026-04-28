@@ -394,7 +394,7 @@ class TestArmSwitchRecovery(unittest.TestCase):
     both bits clear."""
 
     ARM_SWITCH = 1 << 25
-    BAD_RX_RECOVERY = 1 << 7
+    BAD_RX_RECOVERY = 1 << 3   # matches BF's armingDisableFlags_e bit order
 
     def setUp(self):
         cfg = md.MissionConfig()
@@ -411,24 +411,54 @@ class TestArmSwitchRecovery(unittest.TestCase):
             attitude=FakeAttitude(),
         )
 
-    def test_arm_switch_set_drops_aux1_low(self):
+    def test_low_stage_drops_aux1_when_arm_switch_set(self):
         self.m.phase = md.Phase.X_LEG_1
         self.m.last_arming_flags = self.ARM_SWITCH
         rc = self.m.compute_rc(self.snap, now=1.0)
         self.assertEqual(rc[md.SLOT_AUX1], md.PWM_MIN)
         self.assertEqual(rc[md.SLOT_THROTTLE], self.m.cfg.throttle_idle_us)
 
-    def test_bad_rx_recovery_alone_also_drops_aux1_low(self):
-        # Even if ARM_SWITCH hasn't latched yet, BAD_RX_RECOVERY by
-        # itself means the latch is imminent — drop AUX1 to break
-        # the LOW→HIGH transition that latches ARM_SWITCH.
+    def test_bad_rx_recovery_alone_drops_aux1_low(self):
+        # BAD_RX_RECOVERY (bit 3) alone foreshadows the latch — drop
+        # AUX1 preemptively so we never give BF a LOW→HIGH transition
+        # while bad-rx is set.
         self.m.phase = md.Phase.X_LEG_1
         self.m.last_arming_flags = self.BAD_RX_RECOVERY
         rc = self.m.compute_rc(self.snap, now=1.0)
         self.assertEqual(rc[md.SLOT_AUX1], md.PWM_MIN)
 
+    def test_hold_stage_keeps_throttle_idle_after_low(self):
+        # After the LOW stage clears the latch (flags go to 0), we
+        # must hold idle throttle while AUX1 returns HIGH — otherwise
+        # BF re-evaluates arming with throttle high and re-latches
+        # ARM_SWITCH.
+        self.m.phase = md.Phase.LANDING_APPROACH  # would compute thr=1731
+        self.m.last_arming_flags = self.ARM_SWITCH
+        # Tick 1: LOW stage — schedules hold.
+        self.m.compute_rc(self.snap, now=1.0)
+        # Tick 2: latch cleared (flags=0), but hold is active.
+        self.m.last_arming_flags = 0
+        rc = self.m.compute_rc(self.snap, now=1.1)  # within hold window
+        self.assertEqual(rc[md.SLOT_AUX1], md.PWM_MAX,
+                         "AUX1 must rise so the LOW→HIGH transition happens")
+        self.assertEqual(rc[md.SLOT_THROTTLE], self.m.cfg.throttle_idle_us,
+                         "throttle must stay idle during HOLD or BF re-latches")
+
+    def test_normal_flow_resumes_after_hold_window_expires(self):
+        # Once RECOVERY_HOLD_S elapses with clean flags, per-phase
+        # compute resumes (LANDING_APPROACH descent throttle returns).
+        self.m.phase = md.Phase.LANDING_APPROACH
+        self.m.last_arming_flags = self.ARM_SWITCH
+        self.m.compute_rc(self.snap, now=1.0)
+        self.m.last_arming_flags = 0
+        rc = self.m.compute_rc(self.snap, now=1.0 + self.m.RECOVERY_HOLD_S + 0.1)
+        # Normal flow active again — throttle is whatever the descent
+        # controller wants (above idle, below max).
+        self.assertGreater(rc[md.SLOT_THROTTLE], self.m.cfg.throttle_idle_us)
+
     def test_armable_keeps_aux1_high_during_flight(self):
-        # Sanity: when flags are clean, AUX1 stays HIGH so BF stays armed.
+        # Sanity: when flags are clean from the start, AUX1 stays HIGH
+        # so BF stays armed.
         self.m.phase = md.Phase.X_LEG_1
         self.m.last_arming_flags = 0  # ARMABLE
         rc = self.m.compute_rc(self.snap, now=1.0)
