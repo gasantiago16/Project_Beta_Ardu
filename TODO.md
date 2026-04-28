@@ -80,27 +80,31 @@ the context behind each.
    branch could fire on outdated data. Today's runs trust the cache
    refresh thread (2 Hz) — adequate but not bullet-proof.
 
-9. **Altitude oscillation: mission12 peaks at 36-40 m / dips to
-   -16 m on a ~50 s period during normal flight.** Surfaced once
-   the recovery-flow tuning (TODO #2 mitigation) stopped dragging
-   the drone to the ground every 5 s. Cruise alt is 15 m; we're
-   getting 25 m amplitude oscillations. Lateral controller starves
-   because the X_LEG pitch trigger (`abs(h_err) <
-   yaw_align_threshold_deg = 25°`) can't settle while altitude
-   swings are this wild.
-   - **Suspected root cause**: `mission_demo._compute_climb_rc` uses
-     `offset = max(40, min(throttle_max_offset, kp * err_m))` —
-     i.e., minimum 40 µs above hover even when above target. Climb-
-     only, no descent thrust during CLIMB phase.
-   - **Less suspected but possible**: X_LEG's bidirectional altitude
-     controller (`_compute_waypoint_rc`) has `throttle_kp_per_m =
-     6.0` — could be too aggressive, overshooting on each correction.
-   - **Diagnostic recipe**: add per-tick (alt, throttle, phase) log
-     to mission_demo and walk through one oscillation cycle.
-   - **Cheap fixes to try**: (a) replace the `max(40, ...)` clamp
-     in `_compute_climb_rc` with `max(-throttle_max_offset, ...)`
-     so it can descend; (b) lower `throttle_kp_per_m` from 6.0 to
-     2.0; (c) add a small dead-band around target altitude.
+9. ~~Altitude oscillation: mission12 peaks at 36-40 m / dips to -16 m
+   on a ~50 s period.~~ **CLOSED v0.9 (Apr 28 night).** Lowered
+   `throttle_kp_per_m` from 6.0 to 3.0. mission13: amplitude
+   collapsed to ±5 m around 12 m mean. Bonus: the same change
+   eliminated ALL recovery cycles too (mission13 = 0 recoveries
+   over 240 s), so the bit-1 FAILSAFE pulse was apparently
+   triggered by aggressive kp throttle commands, not by a BF timer.
+
+10. **Lateral controller doesn't reach corners — legs time out
+    28-49 m short.** v0.9 has the drone flying stably but lateral
+    progress is unchanged from earlier missions. The X_LEG bearing
+    controller in `_compute_waypoint_rc` has `pitch_kp_per_m = 2.0`
+    + `yaw_align_threshold_deg = 25°`. Drone reaches center area
+    fine but can't push out toward corners.
+    - **Diagnostic next step:** record per-tick (n, e, target_n,
+      target_e, h_err, pitch_us) and see whether yaw_align gate is
+      keeping pitch=0 most of the time.
+    - **Cheap fixes to try (one at a time, like the kp=6→3 ship):**
+      (a) raise `pitch_kp_per_m` to 4.0 — note `racer_companion/
+      nav.py::NavTuning` already defaults to 4.0; mission_demo's
+      2.0 is the outlier; (b) lower `yaw_align_threshold_deg` to
+      10° (only push pitch when really aligned); (c) bump
+      `pitch_max_us` from 200 to 300; (d) extend `leg_timeout_s`
+      from 60 to 120 — *try this last; it masks rather than fixes a
+      slow controller*.
 
 ## Not doing — rejected ideas
 

@@ -181,15 +181,16 @@ class MissionConfig:
     # (chasing a phantom `gps_rescue_throttle_hover` BF setting that
     # 4.5.1 renamed/removed — Iris sank silently during CLIMB).
     throttle_hover_us: int = 1641
-    # P-only altitude controller — no Kd. kp=6, max_offset=200 climbs
-    # aggressively (30% above hover at full error) to get ABOVE the
-    # ground physics weirdness as fast as possible. A gentler 3.0/100
-    # left the drone hovering near z=0 where IrisSim's lack of ground
-    # friction lets ANGLE-mode mixer torques tip the drone, BF saturates
-    # motors trying to recover, drone slides off the map. Better to
-    # overshoot to ~19 m and oscillate within a few m than to never
-    # gain altitude. Real fix is a Kd term keyed to vario; tracked.
-    throttle_kp_per_m: float = 6.0
+    # P-only altitude controller — no Kd. Apr 28 evening: kp=6 gave
+    # ±25 m oscillation around 15 m target in mission12 (peaks 36-40,
+    # dips -16). Lowered to 3 with max_offset=200 to reduce overshoot.
+    # The historical kp=3/max=100 was too gentle for Iris ground
+    # physics, but the current max_offset=200 doubles the saturation
+    # range so kp=3 still produces +90 µs throttle at err=30 m (full
+    # climb authority). If CLIMB phase fails to lift off, try
+    # decoupling CLIMB kp (aggressive) from X_LEG kp (gentle) per
+    # TODO.md item 9. Real fix is still a Kd term keyed to vario.
+    throttle_kp_per_m: float = 3.0
     throttle_max_offset: int = 200
     # Idle throttle during ARM phase. Must be < BF's min_check (1050)
     # so the THROTTLE arming-disable flag clears before AUX1 high

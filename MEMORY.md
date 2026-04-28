@@ -49,6 +49,46 @@ project state.
   - Skipped: lift-out-of-snap-gate optimization (premature) and
     BF-restart-reconnect logic (not blocking)
 
+### v0.9 — altitude controller gentled, latch chain ELIMINATED (Apr 28 night)
+
+`throttle_kp_per_m` lowered from 6.0 to 3.0 in `MissionConfig`.
+`max_offset` stays at 200 (so saturation still gives full ±200 µs
+authority at err=±67 m, plenty of climb headroom).
+
+**mission13 vs mission12** (one-variable change):
+
+| | recoveries / 240 s | RX_FAILSAFE | altitude amplitude | phase reached |
+|---|---|---|---|---|
+| mission12 (kp=6.0) | 3 | 0 | ±25 m around 15 m | TO_CENTER |
+| mission13 (kp=3.0) | **0** | 0 | **±5 m around 12 m** | CIRCLE_1 |
+
+The aggressive kp=6 throttle commands were apparently the trigger
+for the residual bit-1 FAILSAFE pulse we'd been chasing since
+v0.8 (TODO #2 → mitigated v0.8.2 → no recoveries observed v0.9
+on n=1 240 s run). Hypothesis: gentler throttle → fewer state-
+machine perturbations in BF → no failsafe trip → no ARM_SWITCH
+latch → no recovery cycles. Needs 3-5 reruns to confirm (mission7's
+lucky single-run lesson — see v0.7.1 sharp edge).
+
+The recovery flow itself (LOW + 0.3 s idle HOLD + 1.2 s hover HOLD)
+stays in place as a safety net — it just doesn't fire anymore in
+typical Iris flight.
+
+**What didn't change:** legs still time out 28-49 m short of the
+30 m corners. The drone is flying stably but the X_LEG bearing /
+pitch controller doesn't push hard enough to reach corners within
+the 60 s leg timeout. Different problem; queued as TODO #10.
+
+**Companion JSON configs still hardcode kp=6.0** in
+`companion/config/start_line.example.json` and
+`companion/config/sim_waypoint.json`. They feed a different code
+path (`racer_companion/nav.py::NavTuning`, not `mission_demo.
+MissionConfig`), so this kp=3.0 ship is correctly scoped — but
+anyone wiring the racer_companion to drive this same Iris+BF SITL
+stack will trip on the same oscillation. Not fixing in v0.9
+because it's outside the mission_demo scope; flag for whoever
+takes the racer_companion sim-bring-up pass next.
+
 ### v0.8.2 — recovery flow tuned (Apr 28 evening)
 
 After v0.8.1's failed `failsafe_throttle_low_delay` experiment, two
