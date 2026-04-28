@@ -23,6 +23,62 @@ project state.
 
 ---
 
+## Snapshot — v0.7.1 (Apr 28 2026, RX-stall diagnostic + keepalive parked)
+
+| Component | State |
+|---|---|
+| Diagnostic timing in `bf_gps_shim` (--debug-timing) | ✅ shipped. Tracks RC-forward gaps, state-file read times, cache-refresh bursts. Off in production. |
+| RX-stall ROOT CAUSE | ⚠️ identified, not fixed. NOT state-file IO (only 50-68ms reads observed, well under 200ms threshold). Real cause: BF SITL's RX state machine never sees MSP overrides as "real RX", so `arm=0x4[RX_FAILSAFE]` is set chronically. After `failsafe_delay = 200` (20s) of bit-2 set, BF transitions to STAGE2 → bit 1 FAILSAFE fires → with AUX1 high, ARM_SWITCH latches. |
+| `bf_rc_keepalive` UDP 9004 RX heartbeat tool | ✅ shipped, **parked**. Sends 40-B `rc_packet` to UDP 9004 at 50 Hz. Verified BF clears RX_FAILSAFE when it flows (`arm=0x0[ARMABLE]` confirmed via direct MSP query). But integration with mission_demo's MSP overrides is broken (see below). |
+| `msp_override_failsafe = ON` experiment | ❌ tried, reverted. Setting name suggests "MSP overrides always-active including failsafe" but empirically the OPPOSITE: ON disables MSP overrides during normal flight, drone unarmable. Reverted to default OFF. Documented in defaults.txt comment. |
+| `mission6.png` flight | ✅ same as v0.7 mission4. 240s alive, 5 climb-fall cycles to ~27m, completes through CIRCLE_2 phase. Recovery handles each ~25-30s latch. Drone moves around the map but legs time out short of corner waypoints. |
+
+### v0.7.1 changes — what landed in this session
+
+- **`integrations/tools/bf_gps_shim.py`** — added opt-in `--debug-timing`
+  flag plus three instrumentation points: RC-forward gap detection in
+  `_consume_requests`, state-file read timing in `PositionIntegrator
+  ._loop`, cache-refresh burst timing in `_cache_refresh_loop`. All
+  gated by `cfg.debug_timing` so production remains a no-op. Counter-
+  agent reviewed; one dead-line cleanup applied.
+- **`integrations/tools/bf_rc_keepalive.py`** — new tool, 40-B UDP RC
+  heartbeat at 50 Hz to BF SITL's port 9004. Wire format pinned in
+  `test_bf_rc_keepalive.py` (matches `radio_to_bf.py`). Tool works
+  standalone (BF reports ARMABLE) but coexistence with mission_demo
+  MSP overrides is unresolved. Counter-agent caught a BLOCKER (AUX1
+  default arming the box prematurely), a SHOULD-FIX (Windows ICMP
+  unreachable latching the socket — fixed via connect()+send()
+  pattern matching radio_to_bf), and an arm-band test pin. All
+  applied. Default flipped twice during the session as we tried
+  different precedence stories.
+
+### v0.7.1 sharp edges
+
+- **`msp_override_failsafe = ON` BREAKS MSP overrides during normal
+  flight.** Despite the setting name, ON apparently means "MSP
+  overrides are ONLY effective during failsafe" — opposite of what
+  the docs imply. Drone became unarmable. Stay at default OFF.
+  Defaults.txt now has a "DO NOT" comment to prevent re-tripping
+  this footgun.
+- **Keepalive vs MSP override on AUX1 — precedence is unclear.** With
+  keepalive AUX1=LOW + mission_demo MSP override AUX1=HIGH, the
+  keepalive value won and BF never armed (counter-intuitive; with
+  mask=255 + msp_override_failsafe=OFF the override SHOULD apply).
+  With keepalive AUX1=HIGH from boot, BF latched ARM_SWITCH on the
+  initial AUX1 LOW→HIGH transition (BAD_RX_RECOVERY briefly set).
+  No safe coexistence found in this session. Tracked as TODO #1.
+- **Phase-2 UDP-init flake worsens with port reuse.** Today verify_
+  sim_arms repeatedly failed on the default port 38500 after several
+  container restarts (Windows Firewall heuristic blocks high-traffic
+  UDP ports after enough rebinds). Restart-and-retry-with-different-
+  port works around it but is annoying. The orchestrator's ephemeral-
+  port picker (`_pick_motor_port`) handles this correctly.
+- **Recovery flow remains the load-bearing safety net.** Even with
+  the diagnostic + keepalive infrastructure, the actual flight
+  reliability still comes from `mission_demo.py`'s two-stage
+  ARM_SWITCH recovery (LOW + HOLD idle throttle, RECOVERY_HOLD_S =
+  0.6 s). DO NOT remove this code path.
+
 ## Snapshot — v0.7 (Apr 27 2026, end-to-end Isaac Sim flight)
 
 | Component | State |

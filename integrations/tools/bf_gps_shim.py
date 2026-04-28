@@ -65,6 +65,7 @@ MSP_RC = 105
 MSP_ANALOG = 110
 MSP_BOXNAMES = 116
 MSP_STATUS_EX = 150
+MSP_SET_RAW_RC = 200  # client → BF; gap-detection target for diag mode
 
 # Commands the shim caches from BF and serves to clients from a local
 # cache. The racer_companion's BetaflightAdapter polls these 6 cmds at
@@ -149,6 +150,14 @@ class ShimConfig:
     # synthesizes MSP_ALTITUDE the same way it synthesizes MSP_RAW_GPS.
     sim_state_file: str = ""  # filled from DEFAULT_SIM_STATE_FILE in main()
     sim_state_max_age_s: float = 1.0  # warn if stale beyond this
+
+    # Diagnostic timing (opt-in via --debug-timing). When True, log
+    # wall-clock deltas at three suspected stall points: RC-frame
+    # forward gap > 100 ms, state-file read time > 50 ms, cache-
+    # refresh burst > 100 ms. Used to chase the recurring ~18 s RX
+    # stall we observed on Apr 27. Off in production because the
+    # extra log calls themselves add overhead.
+    debug_timing: bool = False
 
 
 # ── MSP response cache ─────────────────────────────────────────────────────
@@ -286,6 +295,7 @@ class PositionIntegrator:
             # integration that doesn't have throttle visibility.
             if now - last_sim_read >= 0.1:
                 last_sim_read = now
+                read_t0 = time.monotonic() if self.cfg.debug_timing else 0.0
                 try:
                     with open(self.cfg.sim_state_file, "r") as f:
                         parts = f.read().strip().split()
@@ -296,6 +306,20 @@ class PositionIntegrator:
                         sim_yaw = float(parts[3])
                 except (OSError, ValueError):
                     pass
+                if self.cfg.debug_timing:
+                    # Diag #2: state-file read time. >50ms is a red
+                    # flag (Defender scan, locked-handle, slow disk).
+                    # The integrator thread is the most likely victim
+                    # of an OS-level file IO stall, and it can
+                    # propagate through the integrator lock to block
+                    # MSP frame parsing in the shim's u→d pump.
+                    read_dt = time.monotonic() - read_t0
+                    if read_dt > 0.050:
+                        log.warning(
+                            "[diag integrator] state-file read took "
+                            "%.3fs (threshold 50ms; file=%s)",
+                            read_dt, self.cfg.sim_state_file,
+                        )
 
             # Snapshot latest sensor reads.
             with self._lock:
@@ -405,7 +429,8 @@ def synthesize_altitude(integrator: PositionIntegrator,
     synthesize the response from the position integrator (which gets
     its altitude indirectly: integrator.feed() runs on every passing
     MSP_ALTITUDE response, but we now also drive the integrator's alt
-    directly from sim physics — see the FDM-side hook).
+    directly from sim physics — see the sim_loop state-file read in
+    PositionIntegrator._loop).
 
     Wire format (matches msp.decode_altitude):
       i32 alt_cm   (signed, cm — relative to home)
@@ -459,6 +484,11 @@ class ClientForwarder:
         # refresh's MSP_ALTITUDE synth path).
         self._up_send_lock = threading.Lock()
         self._down_send_lock = threading.Lock()
+        # Diagnostic state (only consulted when cfg.debug_timing=True).
+        # 0.0 means "no prior frame yet", so the first RC forward
+        # doesn't print a bogus gap. Refresh-burst timing uses a
+        # function-local in _cache_refresh_loop, no instance state.
+        self._last_rc_fwd_t = 0.0
 
     def _send_up(self, data: bytes) -> bool:
         """Locked sendall to BF. Returns False on socket error."""
@@ -586,6 +616,20 @@ class ClientForwarder:
             else:
                 # Non-cached cmd (e.g., MSP_API_VERSION, MSP_FC_VARIANT,
                 # MSP_BOARD_INFO, MSP_SET_RAW_RC). Forward to BF as usual.
+                if cmd == MSP_SET_RAW_RC and self.cfg.debug_timing:
+                    # Diag #1: log wall-clock gap since last RC forward.
+                    # >100ms means BF's rx-loss detector (~200ms hard-
+                    # coded) is at risk; >200ms is the actual stall.
+                    now_t = time.monotonic()
+                    if self._last_rc_fwd_t > 0.0:
+                        gap = now_t - self._last_rc_fwd_t
+                        if gap > 0.100:
+                            log.warning(
+                                "[diag d2u] RC-forward gap %.3fs "
+                                "(threshold 100ms; BF rx-loss ~200ms)",
+                                gap,
+                            )
+                    self._last_rc_fwd_t = now_t
                 if not self._send_up(frame):
                     return
 
@@ -653,6 +697,13 @@ class ClientForwarder:
         period = 1.0 / max(0.1, self.cfg.cache_refresh_hz)
         cmds = list(CACHED_CMDS)
         while not self._stop.is_set():
+            # Diag #3: time the burst-send phase. The cache refresh
+            # holds _up_send_lock briefly N times in succession; if
+            # _send_up is contended (e.g., d→u pump trying to forward
+            # SET_RAW_RC at the same time), this whole loop can stall
+            # and starve RC delivery. >100ms here is the smoking gun
+            # for a refresh-induced RC stall.
+            burst_t0 = time.monotonic() if self.cfg.debug_timing else 0.0
             for cmd in cmds:
                 if self.up is None:
                     return
@@ -661,6 +712,14 @@ class ClientForwarder:
                 # Tiny gap between burst queries so BF can interleave
                 # processing without backlog.
                 time.sleep(0.005)
+            if self.cfg.debug_timing:
+                burst_dt = time.monotonic() - burst_t0
+                if burst_dt > 0.100:
+                    log.warning(
+                        "[diag refresh] cache-refresh burst took "
+                        "%.3fs over %d cmds (threshold 100ms)",
+                        burst_dt, len(cmds),
+                    )
             # Sleep to next refresh tick, in small chunks so we exit
             # promptly when the forwarder shuts down.
             slept = 0.0
@@ -687,6 +746,11 @@ def main() -> int:
                    help=f"Path to sim_loop's state file (default: "
                         f"{DEFAULT_SIM_STATE_FILE})")
     p.add_argument("--log-level", default="INFO")
+    p.add_argument("--debug-timing", action="store_true",
+                   help="Enable wall-clock-gap diagnostics: RC-forward "
+                        "gaps >100ms, state-file reads >50ms, cache-"
+                        "refresh bursts >100ms. Adds log overhead, off "
+                        "by default.")
     args = p.parse_args()
 
     logging.basicConfig(
@@ -704,6 +768,7 @@ def main() -> int:
         origin_alt_m=args.origin_alt,
         sat_count=args.sats,
         sim_state_file=args.sim_state_file,
+        debug_timing=args.debug_timing,
     )
     log.info("sim state file: %s", cfg.sim_state_file)
 

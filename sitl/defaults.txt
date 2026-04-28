@@ -14,6 +14,11 @@
 # (channel 5) to drive the ARM box switch. mask=15 only covered 1-4
 # and silently dropped our arm signal.
 set msp_override_channels_mask = 255
+# DO NOT add `set msp_override_failsafe = ON`. The name implies "make
+# MSP overrides always-active including failsafe" but empirically (Apr
+# 28 in-Sim test) the opposite happens: ON disables MSP overrides
+# during normal flight entirely, leaving the drone unarmable. Default
+# OFF is correct.
 set mag_hardware = NONE
 # BF SITL's barometer needs to be explicitly told to read pressure from
 # FDM packets (the "VIRTUAL" hardware type). Default is NONE, which

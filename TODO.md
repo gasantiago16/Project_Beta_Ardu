@@ -1,28 +1,39 @@
 # TODO
 
-Open items as of v0.7 (Apr 27 2026). See `MEMORY.md` § Snapshot for the
-context behind each.
+Open items as of v0.7.1 (Apr 28 2026). See `MEMORY.md` § Snapshot for
+the context behind each.
 
 ## High — sim flight quality
 
-1. **~18 s recurring RX-stall under sustained Isaac Sim load.**
-   Even with the shim send-lock + two-stage recovery, BF trips full
-   failsafe (`flags=0x200008e`) every ~18 s during a steady X-leg
-   transit. Recovery handles it (the drone keeps flying), but the
-   2 s recovery cycle costs altitude and forward progress, so legs
-   time out 27–42 m short of corners instead of arriving cleanly.
-   - Suspected cause: shim's d→u request thread occasionally blocks
-     for 1–2 s under combined Pegasus 250 Hz physics + Windows-Docker
-     network jitter, gapping the MSP RC stream past BF's hard-coded
-     ~200 ms rx-loss detector.
-   - Diagnostic next step: instrument `_consume_requests` with
-     per-tick wall-time deltas — find the >100 ms gaps and trace them
-     back to the GIL holder (likely `_dispatch_responses` parsing a
-     big STATUS_EX response, or the integrator lock).
-   - Possible fixes: (a) move RC frames to a bypass path that
-     `sendall`s without parsing, (b) split the shim into separate
-     processes for u-pump vs d-pump so the GIL doesn't matter,
-     (c) raise BF's rx-loss detector via a custom 4.5.1 patch.
+1. **~25-30 s recurring RX-failsafe latch.** UPDATED Apr 28 from prior
+   "18 s" hypothesis after instrumentation showed it's NOT the
+   shim's GIL/IO. Real cause: BF SITL's RX state machine doesn't
+   recognize MSP overrides as "real RX", so `arm=0x4[RX_FAILSAFE]`
+   is chronically set during normal flight. After `failsafe_delay`
+   (20 s, max) of bit 2, BF transitions to STAGE2 → bit 1 FAILSAFE
+   fires → with AUX1 HIGH, ARM_SWITCH latches.
+   - **Today's finding** (Apr 28 diag run): only 8 state-file reads
+     over 120 s exceeded 50 ms (max 68 ms), zero RC-forward gaps over
+     100 ms, zero cache-refresh bursts over 100 ms. The shim is fine.
+   - **Today's failed fix attempts** (preserved as cautionary tales
+     in MEMORY.md v0.7.1):
+     - `set msp_override_failsafe = ON` — DON'T do this; it disables
+       MSP overrides during normal flight (despite the name).
+     - `bf_rc_keepalive.py` UDP 9004 RX heartbeat — works in
+       isolation (BF clears RX_FAILSAFE) but conflicts with
+       mission_demo's MSP override on AUX1 in ways we don't yet
+       understand. AUX1 LOW from keepalive prevents arming; AUX1
+       HIGH from boot latches ARM_SWITCH on initial RX-arrival.
+   - **Next session ideas (in order of plausibility):**
+     - (a) Have `mission_demo` send its computed RC values to BOTH
+       MSP TCP 5761 AND UDP 9004 simultaneously (same values, no
+       fight). BF's RX state machine sees the UDP path as "real RX",
+       MSP overrides are unnecessary, the entire override-precedence
+       question disappears.
+     - (b) Find a serialrx_provider config that tricks BF SITL into
+       considering its (nonexistent) UART as a "valid RX" by default.
+     - (c) Patch BF SITL source so the failsafe state machine
+       considers MSP override frames as RX-eligible.
 
 2. **Phase-2 UDP-init flake at SITL boot.** ~50% of `docker compose up`
    results in BF receiving FDM but not sending motors back
