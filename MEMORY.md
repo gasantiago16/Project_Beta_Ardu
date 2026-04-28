@@ -49,6 +49,44 @@ project state.
   - Skipped: lift-out-of-snap-gate optimization (premature) and
     BF-restart-reconnect logic (not blocking)
 
+### v0.10 — drone flies the X-pattern; X_LEG_2 within 10 m of corner (Apr 28 late night)
+
+Diagnose-before-tune via counter-agent recipe. Added `--waypoint-
+trace-csv PATH` flag to `mission_demo` that dumps `(t, phase,
+rel_alt, distance_m, h_err, yaw_aligned, pitch_us, throttle_us,
+target)` per tick from `_compute_waypoint_rc`. mission14 trace
+showed yaw_aligned 90-98 % of ticks (not the bottleneck) and
+pitch_us never saturated (avg 1568-1575 µs of max 1700) — both
+counter-agent hypotheses ruled out cleanly.
+
+Real bottleneck: pitch was deliberately weak. `pitch_kp_per_m =
+2.0 × distance=37 m = +74 µs` forward stick — too gentle for Iris
+to make headway. Drone stalled at 31-34 m from corner.
+
+**Fix:** `MissionConfig.pitch_kp_per_m: 2.0 → 4.0` (matches
+`racer_companion/nav.py::NavTuning` default — mission_demo's 2.0
+was the outlier).
+
+**mission14 (kp=2) vs mission15 (kp=4)** end-of-leg distances:
+
+| leg | mission14 end-dist | mission15 end-dist |
+|-----|--------------------|--------------------|
+| X_LEG_1 (toward NE)   | ~32 m | **18.8 m** |
+| X_LEG_2 (toward SE)   | ~34 m | **10.3 m** ← 5 m would be "arrived"! |
+| X_LEG_3 (toward NW)   | ~32 m | 41.8 m (long diagonal, saturates pitch) |
+
+Recovery count still 0; altitude stable 8-11 m. Mission15
+trajectory plot shows actual X-pattern shape — the drone visits
+NE area (peak ~26 m N), traverses south near SE, swings northwest.
+Lateral excursions ~25-30 m vs mission13's 7 m.
+
+**What's next (TODO #11):** X_LEG_3 is the long diagonal SE→NW
+(~85 m). With pitch_kp=4 and pitch_max_us=200, pitch saturates at
+distance ≥ 50 m, so the drone has +200 µs forward stick for the
+first 35 m — but the leg is still long and the drone struggles.
+Bumping `pitch_max_us` from 200 to 300 (gives +300 µs at full
+saturation) is the obvious next single-variable test.
+
 ### v0.9 — altitude controller gentled, latch chain ELIMINATED (Apr 28 night)
 
 `throttle_kp_per_m` lowered from 6.0 to 3.0 in `MissionConfig`.

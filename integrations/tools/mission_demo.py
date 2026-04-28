@@ -43,6 +43,7 @@ agility. Iris airframe is assumed (rotor_max_omega = 1023 rad/s).
 from __future__ import annotations
 
 import argparse
+import csv
 import logging
 import math
 import socket
@@ -171,7 +172,14 @@ class MissionConfig:
     # Tuning — these are conservative; not race-quad agility.
     yaw_kp: float = 4.0
     yaw_max_us: float = 200.0
-    pitch_kp_per_m: float = 2.0
+    # Apr 28 night: pitch_kp_per_m 2.0 → 4.0 per mission14 trace.
+    # 2.0 produced only +74 µs forward stick at distance=37 m; drone
+    # stalled 31-34 m from corner because forward thrust was too
+    # weak. 4.0 doubles that (pitch_us = 1500 + min(pitch_max,
+    # kp*distance), saturates at distance ≥ pitch_max/kp = 50 m).
+    # Matches `racer_companion/nav.py::NavTuning` default — the
+    # 2.0 here was a mission_demo-specific outlier.
+    pitch_kp_per_m: float = 4.0
     pitch_max_us: float = 200.0
     yaw_align_threshold_deg: float = 25.0
 
@@ -300,6 +308,12 @@ class Mission:
         # the whole time — no new transition, no new latch
         # opportunity.
         self.RECOVERY_HOLD_IDLE_S = 0.3
+        # Per-tick waypoint diagnostic CSV (opt-in via --waypoint-
+        # trace-csv). Used Apr 28 night to chase TODO #10 — why legs
+        # time out 28-49 m short of corners. Writer + file handle are
+        # set by main() if the CLI flag is provided; None otherwise.
+        self._waypoint_csv = None
+        self._waypoint_csv_fh = None
 
     # ── Public interface ────────────────────────────────────────────────
 
@@ -697,6 +711,26 @@ class Mission:
             rc[SLOT_THROTTLE] = self.cfg.throttle_hover_us + t_offset
         else:
             rc[SLOT_THROTTLE] = self.cfg.throttle_hover_us
+        # Per-tick diagnostic trace (TODO #10). Captures the
+        # information needed to decide whether the leg-timeout
+        # shortfall is a yaw-gate problem (yaw_aligned=False most
+        # ticks → drop yaw_align_threshold_deg) or a pitch-saturation
+        # problem (pitch_us pinned at PWM_MID + pitch_max_us → bump
+        # pitch_kp_per_m / pitch_max_us). One writer per Mission;
+        # None in production (no CLI flag) → zero overhead.
+        if self._waypoint_csv is not None:
+            yaw_aligned = abs(h_err) < self.cfg.yaw_align_threshold_deg
+            self._waypoint_csv.writerow([
+                f"{time.monotonic():.3f}",
+                self.phase.value,
+                f"{rel:.2f}" if rel is not None else "",
+                f"{distance:.2f}",
+                f"{h_err:.2f}",
+                int(yaw_aligned),
+                rc[SLOT_PITCH],
+                rc[SLOT_THROTTLE],
+                target.label,
+            ])
 
     def _compute_descent_rc(self, rc: list[int], snap) -> None:
         """Slow throttle reduction at NE corner — let gravity bring it down."""
@@ -736,6 +770,14 @@ def main() -> int:
                    help="Disable UDP 9004 RC dual-write. Default ON. "
                         "Use only when running radio_to_bf as the UDP "
                         "RC source (HANDOVER tests, real pilot input).")
+    p.add_argument("--waypoint-trace-csv", default=None,
+                   help="Path to a CSV file. When set, mission_demo "
+                        "writes one row per tick from _compute_"
+                        "waypoint_rc with (mono_t, phase, rel_alt, "
+                        "distance_m, h_err_deg, yaw_aligned, "
+                        "pitch_us, throttle_us, target). Used to "
+                        "diagnose why X_LEG legs time out short of "
+                        "corners (TODO #10). Off by default.")
     args = p.parse_args()
 
     logging.basicConfig(
@@ -832,6 +874,21 @@ def main() -> int:
     loop_dt = 1.0 / cfg.loop_hz
     last_rc_log = 0.0
     try:
+        # Optional per-tick waypoint trace (TODO #10 diagnostic). Open
+        # inside the try block so a failed open() doesn't leak the
+        # already-opened FC + UDP socket. Header written once;
+        # per-tick rows are emitted from _compute_waypoint_rc.
+        if args.waypoint_trace_csv:
+            mission._waypoint_csv_fh = open(
+                args.waypoint_trace_csv, "w", newline="", encoding="utf-8",
+            )
+            mission._waypoint_csv = csv.writer(mission._waypoint_csv_fh)
+            mission._waypoint_csv.writerow([
+                "mono_t", "phase", "rel_alt_m", "distance_m", "h_err_deg",
+                "yaw_aligned", "pitch_us", "throttle_us", "target",
+            ])
+            log.info("[mission_demo] waypoint trace → %s",
+                     args.waypoint_trace_csv)
         while mission.phase != Phase.DONE:
             t0 = time.monotonic()
             # SEND RC FIRST, then poll telemetry. Reverse order (telem
@@ -896,6 +953,13 @@ def main() -> int:
                 pass
             log.info("[mission_demo] UDP RC: %d packets failed to send",
                      udp_rc_send_errs)
+        if mission._waypoint_csv_fh is not None:
+            try:
+                mission._waypoint_csv_fh.close()
+            except OSError:
+                pass
+            log.info("[mission_demo] waypoint trace closed: %s",
+                     args.waypoint_trace_csv)
 
     log.info("[mission_demo] done.")
     return 0

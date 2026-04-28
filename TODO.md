@@ -88,23 +88,27 @@ the context behind each.
    over 240 s), so the bit-1 FAILSAFE pulse was apparently
    triggered by aggressive kp throttle commands, not by a BF timer.
 
-10. **Lateral controller doesn't reach corners — legs time out
-    28-49 m short.** v0.9 has the drone flying stably but lateral
-    progress is unchanged from earlier missions. The X_LEG bearing
-    controller in `_compute_waypoint_rc` has `pitch_kp_per_m = 2.0`
-    + `yaw_align_threshold_deg = 25°`. Drone reaches center area
-    fine but can't push out toward corners.
-    - **Diagnostic next step:** record per-tick (n, e, target_n,
-      target_e, h_err, pitch_us) and see whether yaw_align gate is
-      keeping pitch=0 most of the time.
-    - **Cheap fixes to try (one at a time, like the kp=6→3 ship):**
-      (a) raise `pitch_kp_per_m` to 4.0 — note `racer_companion/
-      nav.py::NavTuning` already defaults to 4.0; mission_demo's
-      2.0 is the outlier; (b) lower `yaw_align_threshold_deg` to
-      10° (only push pitch when really aligned); (c) bump
-      `pitch_max_us` from 200 to 300; (d) extend `leg_timeout_s`
-      from 60 to 120 — *try this last; it masks rather than fixes a
-      slow controller*.
+10. ~~Lateral controller doesn't reach corners — legs time out
+    28-49 m short.~~ **MITIGATED v0.10 (Apr 28 late night).** Per-
+    tick trace ruled out yaw-gate (97% aligned) and pitch saturation
+    (never hit). Real cause: `pitch_kp_per_m = 2.0` × 37 m = only
+    +74 µs forward stick. Bumped to 4.0; mission15 X_LEG_2 ended
+    10.3 m from SE corner (vs mission14's 34 m). Diagnostic CSV
+    shipped behind `--waypoint-trace-csv` flag for future tuning.
+
+11. **X_LEG_3 (the long SE→NW diagonal) still times out 41.8 m
+    short** — much worse than X_LEG_1/2 in mission15. The leg is
+    ~85 m and pitch saturates at distance ≥ 50 m
+    (`pitch_max_us / pitch_kp_per_m = 200 / 4 = 50 m`). At full
+    saturation the drone has +200 µs forward stick for the first
+    35 m of approach but no headroom beyond.
+    - **Cheap fix to try:** bump `pitch_max_us` from 200 to 300.
+      With `pitch_kp_per_m=4`, full saturation point becomes
+      `300 / 4 = 75 m` — covers most of the long diagonal.
+    - **Less cheap:** add a small Kd term keyed to closing rate so
+      the controller doesn't over-pitch when the drone is already
+      moving forward toward the target.
+    - One variable at a time, per the v0.9 / v0.10 lesson.
 
 ## Not doing — rejected ideas
 
