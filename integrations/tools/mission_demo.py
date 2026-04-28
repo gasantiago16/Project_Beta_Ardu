@@ -45,6 +45,8 @@ from __future__ import annotations
 import argparse
 import logging
 import math
+import socket
+import struct
 import sys
 import time
 from dataclasses import dataclass, field
@@ -86,6 +88,24 @@ SLOT_AUX1 = 4
 SLOT_AUX2 = 5
 SLOT_AUX3 = 6
 SLOT_AUX4 = 7
+
+# BF SITL UDP RC port wire format. We send the SAME 8 channels we send
+# via MSP_SET_RAW_RC, padded to 16 channels with PWM_MID, packed as 1
+# host-native double timestamp + 16 LE uint16 PWM µs values = 40 bytes.
+# BF strict-checks `n == sizeof(rc_packet)`; wrong size = silent drop.
+# Format pinned in `test_bf_rc_keepalive.py` and matches `radio_to_bf.py`
+# (the same struct must agree with both or BF drops one of them).
+# Sending here in addition to MSP gives BF's RX state machine a "real
+# RX" stream — eliminates the chronic RX_FAILSAFE bit-2 set that drove
+# the original 25-30 s ARM_SWITCH-latch cycle (mission6 = 42 bit-2
+# hits, mission7 with this dual-write = 0). Same numbers in both
+# paths means no precedence fight. A separate ~10 s bit-1 FAILSAFE
+# pulse path remains; see TODO.md item 2. UDP send is gated by the
+# same `should_send_msp()` check as MSP; HANDOVER/LOS_TEST stop both
+# so radio_to_bf (HANDOVER) or silence (LOS_TEST) owns UDP 9004.
+_UDP_RC_PACKET = struct.Struct("<d16H")
+assert _UDP_RC_PACKET.size == 40, f"rc_packet must be 40B, got {_UDP_RC_PACKET.size}"
+_NUM_UDP_RC_CHANNELS = 16
 
 
 # ── Phase enum ─────────────────────────────────────────────────────────────
@@ -668,6 +688,20 @@ def main() -> int:
     p.add_argument("--circle-radius", type=float, default=15.0)
     p.add_argument("--rate-hz", type=float, default=50.0)
     p.add_argument("--log-level", default="INFO")
+    # UDP 9004 RC dual-write — companion to MSP_SET_RAW_RC. ON by
+    # default because it kills the chronic RX_FAILSAFE / ARM_SWITCH
+    # latch that yesterday's mission6 still suffered from. Same RC
+    # values go to MSP TCP and UDP, no precedence fight. See
+    # TODO.md item 1(a) and MEMORY.md v0.7.1.
+    p.add_argument("--udp-rc-host", default="127.0.0.1",
+                   help="BF SITL UDP RC host (default: 127.0.0.1)")
+    p.add_argument("--udp-rc-port", type=int, default=9004,
+                   help="BF SITL UDP RC port (default: 9004 per "
+                        "betaflight/4.5.1 src/main/target/SITL/sitl.c).")
+    p.add_argument("--no-udp-rc", action="store_true",
+                   help="Disable UDP 9004 RC dual-write. Default ON. "
+                        "Use only when running radio_to_bf as the UDP "
+                        "RC source (HANDOVER tests, real pilot input).")
     args = p.parse_args()
 
     logging.basicConfig(
@@ -738,6 +772,29 @@ def main() -> int:
             return "ARMABLE"
         return ",".join(n for i, n in enumerate(names) if flags & (1 << i))
 
+    # UDP RC dual-write socket. We send the SAME 8 channels via MSP
+    # AND UDP 9004 every tick; BF's RX state machine treats the UDP
+    # path as "real RX" and stops chronically tripping RX_FAILSAFE.
+    # connect() lets us use send() and surfaces ICMP unreachable as
+    # ConnectionRefusedError on Windows (instead of latching the
+    # socket on first failure). Best-effort — swallow connect-time
+    # OSError so mission_demo doesn't fail startup if BF SITL isn't
+    # quite ready yet. Same pattern as bf_rc_keepalive / radio_to_bf.
+    udp_rc_sock: socket.socket | None = None
+    udp_rc_addr = (args.udp_rc_host, args.udp_rc_port)
+    udp_rc_send_errs = 0
+    if not args.no_udp_rc:
+        udp_rc_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            udp_rc_sock.connect(udp_rc_addr)
+        except OSError:
+            pass
+        log.info("[mission_demo] UDP RC dual-write → %s:%d (40-B rc_packet)",
+                 udp_rc_addr[0], udp_rc_addr[1])
+    else:
+        log.info("[mission_demo] --no-udp-rc set; MSP-only RC. "
+                 "Expect periodic RX_FAILSAFE / ARM_SWITCH latches.")
+
     loop_dt = 1.0 / cfg.loop_hz
     last_rc_log = 0.0
     try:
@@ -752,14 +809,34 @@ def main() -> int:
                 rc = mission.compute_rc(snap, t0)
                 rc[SLOT_THROTTLE] = min(rc[SLOT_THROTTLE], 1841)
                 fc.send_overrides(rc)
+                # UDP RC dual-write: pad rc[8] to 16 channels with
+                # PWM_MID, pack as 40-B rc_packet, send to BF's UDP RX
+                # port. Same values as MSP, no precedence fight. A
+                # send error doesn't break the loop — BF can lose a
+                # frame here and there; what matters is the steady
+                # 50-Hz stream so the RX state machine stays happy.
+                if udp_rc_sock is not None:
+                    udp_channels = list(rc) + [PWM_MID] * (
+                        _NUM_UDP_RC_CHANNELS - len(rc)
+                    )
+                    try:
+                        udp_rc_sock.send(
+                            _UDP_RC_PACKET.pack(t0, *udp_channels)
+                        )
+                    except OSError as e:
+                        udp_rc_send_errs += 1
+                        if udp_rc_send_errs <= 3 or udp_rc_send_errs % 200 == 0:
+                            log.warning(
+                                "[mission_demo] UDP RC send failed "
+                                "(%d so far): %s",
+                                udp_rc_send_errs, e,
+                            )
                 if t0 - last_rc_log > 1.0:
                     last_rc_log = t0
                     rel = (snap.altitude.alt_cm / 100.0 - mission.home.alt_m) if (
                         snap.altitude and mission.home) else None
                     arm_flag_str = _decode_arming(fc._last_arming_flags) if fc._last_arming_flags >= 0 else "?"
                     payload_hex = getattr(fc, "_last_status_payload", "?")
-                    rel = (snap.altitude.alt_cm / 100.0 - mission.home.alt_m) if (
-                        snap.altitude and mission.home) else None
                     log.info(
                         "[rc] %s thr=%d aux1=%d rel_alt=%s arm=0x%x[%s] fm=0x%x",
                         mission.phase.value, rc[SLOT_THROTTLE], rc[SLOT_AUX1],
@@ -778,6 +855,13 @@ def main() -> int:
         log.info("[mission_demo] interrupted")
     finally:
         fc.close()
+        if udp_rc_sock is not None:
+            try:
+                udp_rc_sock.close()
+            except OSError:
+                pass
+            log.info("[mission_demo] UDP RC: %d packets failed to send",
+                     udp_rc_send_errs)
 
     log.info("[mission_demo] done.")
     return 0

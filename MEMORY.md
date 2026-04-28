@@ -23,6 +23,53 @@ project state.
 
 ---
 
+## Snapshot — v0.8 (Apr 28 PM 2026, dual-write kills chronic RX_FAILSAFE)
+
+| Component | State |
+|---|---|
+| `mission_demo` UDP 9004 dual-write (TODO #1a) | ✅ shipped + verified. Same RC values flow to both MSP TCP 5761 and UDP 9004 every tick. Default ON; `--no-udp-rc` to disable. |
+| Chronic RX_FAILSAFE bit-2 latch | ✅ **eliminated**. mission7 = 0 RX_FAILSAFE hits in 240 s of `[rc]` logs. mission6 (yesterday, same setup minus dual-write) = 42 hits. Architecturally clean fix — single source of truth for RC means no precedence fight. |
+| `bf_rc_keepalive` standalone tool | ⚠️ obsoleted by dual-write but kept in tree for HANDOVER-phase pilot-input testing. Wire format pin still useful. |
+| Remaining bit-1 FAILSAFE pulses | ⚠️ open. Mission7 had ~10 s recovery cadence vs mission6's ~25-30 s — actually faster, with `flags=0x2000080` (THROTTLE+ARM_SWITCH) and `0x2000082` (FAILSAFE+THROTTLE+ARM_SWITCH) showing. Source unknown — separate from RX state machine. Recovery flow handles each. |
+| X-pattern flight quality | comparable to mission6. Drone alive 240 s, climbs to 27 m peak, sustained 5-17 m through CIRCLE_2 phase. Legs still time out 33-42 m short of corners. |
+
+### v0.8 changes — what landed in this session (Apr 28 PM)
+
+- **`integrations/tools/mission_demo.py`** — added UDP 9004 dual-write
+  alongside existing MSP_SET_RAW_RC. New CLI args:
+  `--udp-rc-host`, `--udp-rc-port`, `--no-udp-rc`. Default is dual-
+  write ON. The same `rc[]` list `compute_rc()` produces is sent on
+  both paths every tick — identical 8 channels via MSP, padded to 16
+  via UDP. Send errors counted, never raised. Socket `connect()`
+  pattern matches `radio_to_bf` / `bf_rc_keepalive` (Windows ICMP
+  unreachable handling).
+- Counter-agent reviewed; 4 NITs found (none blockers). Applied:
+  - HANDOVER/LOS_TEST gating doc note added to constants block
+  - Pre-existing duplicate `rel = ...` line cleaned up
+  - Skipped: lift-out-of-snap-gate optimization (premature) and
+    BF-restart-reconnect logic (not blocking)
+
+### v0.8 sharp edges
+
+- **Two bit-1 FAILSAFE triggers exist in BF SITL.** The original
+  RX_FAILSAFE → STAGE2 path (bit 2 → bit 1 after 20 s) is dead now
+  — dual-write keeps bit 2 quiet. But mission7 still saw bit 1 fire
+  on a ~10 s cycle without bit 2 ever appearing. Source unknown
+  pending next session's investigation. Don't assume "no bit 2 = no
+  bit 1"; check both. Possible candidates: `failsafe_throttle_low_
+  delay`, BOXFAILSAFE, or some BF SITL-specific timer.
+- **Wire format `<d16H` 40 B is now pinned in THREE places** —
+  `bf_rc_keepalive.RC_PACKET`, `radio_to_bf.UDP_RC_PACKET`, and
+  `mission_demo._UDP_RC_PACKET`. All three must agree or BF silently
+  drops. The `assert _UDP_RC_PACKET.size == 40` lines are
+  load-bearing; do not remove them in a refactor.
+- **`should_send_msp()` now gates UDP too.** During HANDOVER/LOS_TEST,
+  mission_demo stops sending BOTH MSP and UDP. That's the right
+  semantic (radio_to_bf owns UDP 9004 during HANDOVER; LOS_TEST
+  needs RC silence to trigger BF's failsafe). If a future maintainer
+  wants UDP keepalive even during HANDOVER, they'll need a separate
+  gate.
+
 ## Snapshot — v0.7.1 (Apr 28 2026, RX-stall diagnostic + keepalive parked)
 
 | Component | State |

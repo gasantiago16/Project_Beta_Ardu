@@ -387,7 +387,7 @@ class TestComputeRc(unittest.TestCase):
 
 class TestArmSwitchRecovery(unittest.TestCase):
     """The shim/Docker MSP path occasionally drops a SET_RAW_RC frame,
-    BF flags BAD_RX_RECOVERY (bit 7), and while AUX1 is still high
+    BF flags BAD_RX_RECOVERY (bit 3), and while AUX1 is still high
     BF latches ARM_SWITCH (bit 25). Without intervention the drone
     falls — only AUX1 going LOW clears the latch. compute_rc spots
     the latch mid-flight and drops AUX1 LOW + idle throttle until
