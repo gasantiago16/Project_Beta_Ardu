@@ -49,6 +49,28 @@ project state.
   - Skipped: lift-out-of-snap-gate optimization (premature) and
     BF-restart-reconnect logic (not blocking)
 
+### v0.8.1 follow-up — Apr 28 PM cautionary tale
+
+Same-day attempt to close the residual bit-1 FAILSAFE pulse via
+`set failsafe_throttle_low_delay = 200` in defaults.txt. Hypothesis:
+the ~10 s cadence matched the setting's default (100 × 0.1 s).
+**Empirically WORSE**: mission8 had recovery firing every ~3 s and
+the drone never lifted off ("CLIMB timeout AND rel_alt 0.00m < 5.0m").
+mission8 was killed mid-run, so only `mission8_md.log` exists — no
+png/csv artifact for that one. After reverting, mission9 also
+unexpectedly failed (drone got to 2.14 m before timeout — likely a
+flake from the docker-compose down/build cycle). mission10 (clean
+container restart) confirmed v0.8 baseline behavior persists (53
+recoveries / 240 s, drone progresses through TO_CENTER but crashes
+during CIRCLE_1). Mission7's clean reach to CIRCLE_2 was a
+particularly lucky run, not the typical case.
+
+DO NOT add `set failsafe_throttle_low_delay = 200`. The setting's
+behavior in BF 4.5.1 SITL doesn't match the docs (or my
+understanding of them). Either the units are different, or it
+controls something other than "throttle-low timeout." Walk BF source
+`betaflight/4.5.1/src/main/flight/failsafe.c` before guessing again.
+
 ### v0.8 sharp edges
 
 - **Two bit-1 FAILSAFE triggers exist in BF SITL.** The original

@@ -10,24 +10,35 @@ the context behind each.
    mission7 has zero `[rc]` log hits with RX_FAILSAFE, vs mission6's
    42. See MEMORY.md v0.8.
 
-2. **Bit-1 FAILSAFE pulses on a ~10 s cycle, without bit 2.**
-   New problem surfaced by closing #1. mission7 recovery events
-   showed `flags=0x2000082` (FAILSAFE+THROTTLE+ARM_SWITCH) and
-   `flags=0x2000080` (THROTTLE+ARM_SWITCH) — bit-1 FAILSAFE without
-   the usual bit-2 RX_FAILSAFE precursor. So this is a different BF
-   trigger, not the standard STAGE2 transition we already fixed.
-   Recovery handles each, but cadence is faster (~10 s vs yesterday's
-   25-30 s) so legs still time out 33-42 m short of corners.
-   - **Diagnostic next step**: walk BF source `failsafeUpdateState()`
-     entry conditions. Plausible candidates:
-     - `failsafe_throttle_low_delay` (default 100 = 10 s) — fires
-       when throttle < min_check too long. mission_demo's INIT/ARM
-       phases keep throttle at 950 µs for 7 s, but X_LEG phases
-       have throttle 1731. Could the timer not reset?
-     - BOXFAILSAFE (bit 4) on a transient mode bit during recovery.
-     - BF SITL-specific timer unrelated to the real-firmware paths.
-   - **Cheap test:** read BF's CLI `get failsafe_throttle_low_delay`
-     and try setting it to 200 (20 s) to see if the cadence stretches.
+2. **Bit-1 FAILSAFE / ARM_SWITCH cycles every ~3-10 s in CLIMB and
+   X_LEG phases, source unknown.** The dual-write fix for #1 closed
+   the chronic RX_FAILSAFE (bit-2) path but exposed a separate
+   trigger that fires roughly every 3-10 s and re-latches ARM_SWITCH
+   via `flags=0x2000082` (FAILSAFE+THROTTLE+ARM_SWITCH) or
+   `flags=0x2000080` (THROTTLE+ARM_SWITCH). Mission7 happened to
+   land on the loose end (10 s spacing → drone reached CIRCLE_2);
+   mission10's 53 recoveries / 240 s shows typical behavior is
+   tighter and the drone crashes during CIRCLE_1.
+   - **Apr 28 PM failed experiment** (preserved as cautionary tale):
+     hypothesis was `failsafe_throttle_low_delay` (default 100, in
+     0.1 s units = 10 s) matched the cadence, so bumping to 200
+     should stretch it. mission8 with this setting baked: drone
+     NEVER lifted off, recovery fired ~every 3 s. Either BF 4.5.1
+     semantics for `failsafe_throttle_low_delay` differ from the
+     docs, or the bit-1 trigger is elsewhere entirely. Reverted in
+     `sitl/defaults.txt` with a "DO NOT" comment.
+   - **Real diagnostic now needed**: walk BF source
+     `betaflight/4.5.1/src/main/flight/failsafe.c` and identify
+     every entry into `FAILSAFE_RX_LOSS_DETECTED` state without an
+     RX_LOSS prerequisite. The `[rc]` flag pattern in the next
+     run's log will show which BF transition fires; cross-ref to
+     source.
+   - **Less cheap mitigation**: detect ARM_SWITCH latch in
+     `mission_demo.compute_rc` more aggressively and avoid throttle
+     transitions across the LOW→HIGH AUX1 edge. Possibly extend the
+     HOLD stage to longer (e.g. `RECOVERY_HOLD_S = 2.0` instead of
+     0.6) so the drone has time to settle before throttle ramps up
+     again.
 
 3. **Phase-2 UDP-init flake at SITL boot.** ~50% of `docker compose up`
    results in BF receiving FDM but not sending motors back

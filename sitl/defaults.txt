@@ -69,3 +69,12 @@ aux 1 1 0 900 2100 0 0
 # it to 200 too broke arming entirely (BF main loop stalled). Real
 # hardware doesn't need this.
 set failsafe_delay = 200
+# DO NOT add `set failsafe_throttle_low_delay = 200`. Apr 28 mission8
+# tried it on the hypothesis that the residual ~10 s bit-1 FAILSAFE
+# pulse matched this setting's default. EMPIRICALLY the change made
+# things WORSE: recovery cadence dropped to ~3 s, drone never lifted
+# off, mission_demo aborted with "CLIMB timeout … never lifted off".
+# Either the BF 4.5.1 semantics of this setting differ from the docs
+# (default 100 = 10 s of tolerance), or the bit-1 trigger is elsewhere
+# entirely. Default OFF (= unset = BF default 100) is correct until we
+# read BF source `failsafeUpdateState()` to find the real trigger.
