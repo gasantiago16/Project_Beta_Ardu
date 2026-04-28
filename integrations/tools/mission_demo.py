@@ -247,6 +247,14 @@ class Mission:
         self.home: Waypoint | None = None
         self.corners: dict[str, Waypoint] = {}
         self.circle_phase_offset_s = 0.0  # wraps every circle_period_s
+        # Mid-flight latch recovery (BF SITL artifact). Set by the main
+        # loop from fc._last_arming_flags; -1 means we haven't received
+        # any STATUS_EX yet.
+        self.last_arming_flags = -1
+        # Number of consecutive recovery ticks performed in this episode
+        # — diagnostic only; logged so we can spot frequent recoveries.
+        self._recovery_ticks = 0
+        self._recovery_logged_at = 0.0
 
     # ── Public interface ────────────────────────────────────────────────
 
@@ -304,6 +312,43 @@ class Mission:
         # high BEFORE we've started the arm sequence and may latch
         # ARM_SWITCH on the inevitable first-tick high-throttle blip.
         rc[SLOT_AUX1] = PWM_MIN if self.phase == Phase.INIT else PWM_MAX
+
+        # ── ARM_SWITCH-latch recovery (BF SITL artifact) ─────────────
+        # Once we're past INIT/ARM (i.e., the drone has already been
+        # successfully armed and is flying), the only way ARM_SWITCH
+        # (bit 25) gets set is the BF SITL latch path: a transient
+        # BAD_RX_RECOVERY (bit 7) appeared while AUX1 was high, which
+        # latched ARM_SWITCH. Once latched, BF never re-arms unless
+        # AUX1 goes LOW. We do that here — drop AUX1 LOW + idle
+        # throttle + center sticks until BOTH the ARM_SWITCH bit AND
+        # the BAD_RX_RECOVERY bit clear, then the next tick's normal
+        # flow raises AUX1 HIGH again (via line above) and BF re-arms
+        # cleanly. Real BF on STM32 with a real RX never trips this;
+        # the latch is specific to the shim/Docker MSP path.
+        ARM_SWITCH_BIT = 1 << 25
+        BAD_RX_RECOVERY_BIT = 1 << 7
+        LATCH_MASK = ARM_SWITCH_BIT | BAD_RX_RECOVERY_BIT
+        flags = self.last_arming_flags
+        if (
+            flags > 0
+            and (flags & LATCH_MASK)
+            and self.phase not in (Phase.INIT, Phase.ARM, Phase.DONE)
+        ):
+            # Recovery in progress: AUX1 LOW (clears ARM_SWITCH), idle
+            # throttle (clears THROTTLE), centered sticks (no control
+            # input). Return early — skip the per-phase RC computation
+            # below since we're not actively flying this tick.
+            rc[SLOT_AUX1] = PWM_MIN
+            rc[SLOT_THROTTLE] = self.cfg.throttle_idle_us
+            self._recovery_ticks += 1
+            if now - self._recovery_logged_at >= 0.5:
+                self._recovery_logged_at = now
+                log.warning(
+                    "[recover] ARM_SWITCH latch — AUX1 LOW (tick %d) "
+                    "flags=0x%x phase=%s",
+                    self._recovery_ticks, flags, self.phase.value,
+                )
+            return rc
         if not snap.gps or not snap.gps.fix:
             return rc
 

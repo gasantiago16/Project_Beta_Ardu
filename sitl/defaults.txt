@@ -53,3 +53,14 @@ set power_on_arming_grace_time = 0
 # AUX1 is in [1700,2100]".
 aux 0 0 0 1700 2100 0 0
 aux 1 1 0 900 2100 0 0
+# RX_FAILSAFE tolerance for SITL only. BF default is 15 (× 0.1 s = 1.5 s)
+# which is appropriate for real flight where RX really can drop frames.
+# In our SITL setup BF occasionally flags RX_FAILSAFE on a transient
+# (Pegasus FDM rate fluctuating, MSP TCP frame batching, etc.) and once
+# any disable bit is set while AUX1 is high, ARM_SWITCH (bit 25) latches
+# permanently — drone disarms mid-flight, can't recover. Bumping to 200
+# = 20 s of tolerance lets the demo complete its X-pattern. The
+# `failsafe_off_delay` setting is intentionally LEFT AT DEFAULT — bumping
+# it to 200 too broke arming entirely (BF main loop stalled). Real
+# hardware doesn't need this.
+set failsafe_delay = 200

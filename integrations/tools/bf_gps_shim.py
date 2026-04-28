@@ -448,6 +448,39 @@ class ClientForwarder:
         self.up: socket.socket | None = None
         self.cache = ResponseCache()
         self._stop = threading.Event()
+        # Serializes ALL writes to `self.up` (BF). Two threads write to it:
+        # _down_to_up (forwarding client requests like MSP_SET_RAW_RC) and
+        # _cache_refresh_loop (background polls). Without this lock, Python
+        # socket sendall is not atomic — bytes from concurrent sends can
+        # interleave mid-frame, corrupting MSP_SET_RAW_RC. BF then drops
+        # the bad frame, the rx-loss timer trips, and BAD_RX_RECOVERY (bit
+        # 7) sets — which latches ARM_SWITCH while AUX1 is high. Same
+        # reasoning for `self.down` (writes from request handler + cache
+        # refresh's MSP_ALTITUDE synth path).
+        self._up_send_lock = threading.Lock()
+        self._down_send_lock = threading.Lock()
+
+    def _send_up(self, data: bytes) -> bool:
+        """Locked sendall to BF. Returns False on socket error."""
+        if self.up is None:
+            return False
+        with self._up_send_lock:
+            try:
+                self.up.sendall(data)
+                return True
+            except OSError:
+                self._stop.set()
+                return False
+
+    def _send_down(self, data: bytes) -> bool:
+        """Locked sendall to client. Returns False on socket error."""
+        with self._down_send_lock:
+            try:
+                self.down.sendall(data)
+                return True
+            except OSError:
+                self._stop.set()
+                return False
 
     def run(self) -> None:
         try:
@@ -510,18 +543,12 @@ class ClientForwarder:
                     # hasn't fully arrived). Keep last 2 bytes in case `$M`
                     # split across recv boundaries.
                     if len(buf) > 2:
-                        try:
-                            self.up.sendall(bytes(buf[:-2]))
-                        except OSError:
-                            self._stop.set()
+                        if not self._send_up(bytes(buf[:-2])):
                             return
                         del buf[:-2]
                 return
             if i > 0:
-                try:
-                    self.up.sendall(bytes(buf[:i]))
-                except OSError:
-                    self._stop.set()
+                if not self._send_up(bytes(buf[:i])):
                     return
                 del buf[:i]
             if len(buf) < 6:
@@ -535,23 +562,17 @@ class ClientForwarder:
             del buf[:total]
             if cmd == MSP_RAW_GPS:
                 # Synthesized from integrator — never reaches BF.
-                try:
-                    self.down.sendall(synthesize_raw_gps(
-                        self.integrator, self.cfg,
-                    ))
-                except OSError:
-                    self._stop.set()
+                if not self._send_down(synthesize_raw_gps(
+                    self.integrator, self.cfg,
+                )):
                     return
             elif cmd == MSP_ALTITUDE:
                 # Also synthesized — BF SITL's VIRTUAL baro returns 0
                 # in this build, so we compute alt from the integrator
                 # which mirrors sim_loop's truth.
-                try:
-                    self.down.sendall(synthesize_altitude(
-                        self.integrator, self.cfg,
-                    ))
-                except OSError:
-                    self._stop.set()
+                if not self._send_down(synthesize_altitude(
+                    self.integrator, self.cfg,
+                )):
                     return
             elif cmd in CACHED_CMDS:
                 # Serve from cache. The refresh thread keeps it warm.
@@ -560,18 +581,12 @@ class ClientForwarder:
                 # time the refresh thread has populated the cache.
                 cached = self.cache.get(cmd)
                 if cached is not None:
-                    try:
-                        self.down.sendall(cached)
-                    except OSError:
-                        self._stop.set()
+                    if not self._send_down(cached):
                         return
             else:
                 # Non-cached cmd (e.g., MSP_API_VERSION, MSP_FC_VARIANT,
                 # MSP_BOARD_INFO, MSP_SET_RAW_RC). Forward to BF as usual.
-                try:
-                    self.up.sendall(frame)
-                except OSError:
-                    self._stop.set()
+                if not self._send_up(frame):
                     return
 
     def _up_to_down(self) -> None:
@@ -627,10 +642,7 @@ class ClientForwarder:
                 self.cache.store(cmd, frame)
             else:
                 # One-off response (e.g., MSP_API_VERSION) — forward.
-                try:
-                    self.down.sendall(frame)
-                except OSError:
-                    self._stop.set()
+                if not self._send_down(frame):
                     return
 
     def _cache_refresh_loop(self) -> None:
@@ -644,9 +656,7 @@ class ClientForwarder:
             for cmd in cmds:
                 if self.up is None:
                     return
-                try:
-                    self.up.sendall(_msp_request(cmd))
-                except OSError:
+                if not self._send_up(_msp_request(cmd)):
                     return
                 # Tiny gap between burst queries so BF can interleave
                 # processing without backlog.

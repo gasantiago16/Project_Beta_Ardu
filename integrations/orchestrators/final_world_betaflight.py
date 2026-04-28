@@ -541,9 +541,43 @@ def main() -> int:
     last_stats_t = time.monotonic()
     last_stats = bf_backend.stats()
 
+    # State file path — same default as sim_loop / bf_gps_shim. The shim
+    # reads this for ground-truth position when synthesizing MSP_ALTITUDE
+    # responses. With Pegasus driving the physics here (instead of
+    # sim_loop), we publish from bf_backend._latest_state.
+    import tempfile
+    state_file_path = os.path.join(tempfile.gettempdir(), "bf_sim_state.txt")
+    print(f"[final_world_betaflight] Publishing sim state to: {state_file_path}",
+          flush=True)
+    last_state_write = 0.0
+
     try:
         while simulation_app.is_running():
             world.step(render=True)
+
+            # Publish ground-truth state for the shim to synthesize
+            # MSP_ALTITUDE + MSP_RAW_GPS. ~10 Hz throttle.
+            now_state = time.monotonic()
+            if now_state - last_state_write >= 0.1:
+                last_state_write = now_state
+                st = bf_backend._latest_state
+                if st is not None:
+                    try:
+                        # Pegasus state is ENU/FLU. ENU position:
+                        # x=east, y=north, z=up. Shim wants n,e,alt,yaw.
+                        # Yaw from quaternion (xyzw, body→world FLU).
+                        from scipy.spatial.transform import Rotation as _R
+                        rot = _R.from_quat(st.attitude)
+                        _, _, yaw_deg = rot.as_euler("xyz", degrees=True)
+                        with open(state_file_path, "w") as _f:
+                            _f.write(
+                                f"{st.position[1]:.3f} "
+                                f"{st.position[0]:.3f} "
+                                f"{st.position[2]:.3f} "
+                                f"{yaw_deg:.2f}\n"
+                            )
+                    except (OSError, AttributeError):
+                        pass
 
             # Periodic bridge-health log. 0 disables.
             if args.stats_interval_s > 0:

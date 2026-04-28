@@ -382,5 +382,77 @@ class TestComputeRc(unittest.TestCase):
         self.assertAlmostEqual(rc[2], 1500, delta=20)
 
 
+# ── ARM_SWITCH-latch recovery ─────────────────────────────────────────────
+
+
+class TestArmSwitchRecovery(unittest.TestCase):
+    """The shim/Docker MSP path occasionally drops a SET_RAW_RC frame,
+    BF flags BAD_RX_RECOVERY (bit 7), and while AUX1 is still high
+    BF latches ARM_SWITCH (bit 25). Without intervention the drone
+    falls — only AUX1 going LOW clears the latch. compute_rc spots
+    the latch mid-flight and drops AUX1 LOW + idle throttle until
+    both bits clear."""
+
+    ARM_SWITCH = 1 << 25
+    BAD_RX_RECOVERY = 1 << 7
+
+    def setUp(self):
+        cfg = md.MissionConfig()
+        self.m = md.Mission(cfg)
+        # Lock home + corners so we can reach a flying phase.
+        self.m.update(FakeSnap(
+            gps=FakeGps(lat_deg=41.0, lon_deg=-74.0),
+            altitude=FakeAltitude(alt_cm=0),
+            attitude=FakeAttitude(),
+        ), now=0.0)
+        self.snap = FakeSnap(
+            gps=FakeGps(lat_deg=41.0, lon_deg=-74.0),
+            altitude=FakeAltitude(alt_cm=2000),  # 20m, mid-flight
+            attitude=FakeAttitude(),
+        )
+
+    def test_arm_switch_set_drops_aux1_low(self):
+        self.m.phase = md.Phase.X_LEG_1
+        self.m.last_arming_flags = self.ARM_SWITCH
+        rc = self.m.compute_rc(self.snap, now=1.0)
+        self.assertEqual(rc[md.SLOT_AUX1], md.PWM_MIN)
+        self.assertEqual(rc[md.SLOT_THROTTLE], self.m.cfg.throttle_idle_us)
+
+    def test_bad_rx_recovery_alone_also_drops_aux1_low(self):
+        # Even if ARM_SWITCH hasn't latched yet, BAD_RX_RECOVERY by
+        # itself means the latch is imminent — drop AUX1 to break
+        # the LOW→HIGH transition that latches ARM_SWITCH.
+        self.m.phase = md.Phase.X_LEG_1
+        self.m.last_arming_flags = self.BAD_RX_RECOVERY
+        rc = self.m.compute_rc(self.snap, now=1.0)
+        self.assertEqual(rc[md.SLOT_AUX1], md.PWM_MIN)
+
+    def test_armable_keeps_aux1_high_during_flight(self):
+        # Sanity: when flags are clean, AUX1 stays HIGH so BF stays armed.
+        self.m.phase = md.Phase.X_LEG_1
+        self.m.last_arming_flags = 0  # ARMABLE
+        rc = self.m.compute_rc(self.snap, now=1.0)
+        self.assertEqual(rc[md.SLOT_AUX1], md.PWM_MAX)
+
+    def test_recovery_skipped_during_init(self):
+        # During INIT the AUX1=LOW is the normal flow, not recovery —
+        # don't waste log lines yelling about a "latch" that's the
+        # baseline state. Verify the recovery branch leaves the
+        # diagnostic counter at zero.
+        self.m.phase = md.Phase.INIT
+        self.m.last_arming_flags = self.ARM_SWITCH
+        self.m.compute_rc(self.snap, now=1.0)
+        self.assertEqual(self.m._recovery_ticks, 0)
+
+    def test_unset_flags_no_recovery(self):
+        # Before MSP_STATUS_EX has been received, last_arming_flags = -1.
+        # Recovery must not fire on the unsigned interpretation of -1.
+        self.m.phase = md.Phase.X_LEG_1
+        self.m.last_arming_flags = -1
+        rc = self.m.compute_rc(self.snap, now=1.0)
+        self.assertEqual(rc[md.SLOT_AUX1], md.PWM_MAX)
+        self.assertEqual(self.m._recovery_ticks, 0)
+
+
 if __name__ == "__main__":
     unittest.main()
