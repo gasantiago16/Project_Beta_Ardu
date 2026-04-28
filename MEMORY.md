@@ -49,6 +49,99 @@ project state.
   - Skipped: lift-out-of-snap-gate optimization (premature) and
     BF-restart-reconnect logic (not blocking)
 
+### v0.12 — in-sim visual UX (Apr 29 mid-morning)
+
+User asked for two operator-visibility improvements while watching
+mission19 in Isaac Sim:
+> Different color Shapes on the swan point and the way points it
+> needs to land on in the sim and also have the sim spwan a waypoint
+> bubble where the sim wants it ro go every 25 m so we can see if
+> we're contoling or just guessing
+
+Shipped:
+
+1. **Static colored marker spheres** placed at orchestrator startup:
+   spawn (green), SW (blue), SE (magenta), NE (orange), NW (yellow),
+   CENTER (white). Positioned via Pegasus ENU coords from `args.spawn`
+   ± `args.map_half_size`. Lives at `/World/markers/{name}` USD
+   prims with `displayColor` attribute set per marker.
+
+2. **Dynamic "target bubble"** at `/World/markers/target` (red, 1m
+   sphere). Orchestrator polls `tempfile.gettempdir()/bf_target_
+   state.txt` ~10 Hz; mission_demo writes to it every tick from
+   `_publish_target_state()` containing home-relative N/E/alt for
+   the current waypoint. Orchestrator translates target marker prim
+   to match. Operator can SEE whether drone is following commanded
+   target or drifting.
+
+The "every 25 m" trail of breadcrumbs the user mentioned isn't shipped
+yet — current target bubble is a single-prim live position. If we
+need a trail, add a deque of older targets and render N spheres from
+that. Marked as TODO #12.
+
+Helper added: `Mission._active_target(now)` — unifies waypoint-vs-
+circle target lookup so both `_publish_target_state()` and future
+callers don't need to know which phase uses which.
+
+CLI flag `--target-state-file` added to `mission_demo` (default
+matches `DEFAULT_TARGET_STATE_FILE`); the orchestrator reads from
+the same default. Empty string disables.
+
+### v0.11 — flip detection + respawn signal (Apr 29 morning)
+
+Today's defensive day. Three failed experiments + two real ships:
+
+**What we tested and reverted (one-variable-at-a-time):**
+
+| run | change | result | reverted? |
+|-----|--------|--------|-----------|
+| mission16 | `pitch_max_us 200→300` | X_LEG_3 41.8→33.7 m short, but stalled at 33.7 m for 30 s (drone hit obstacles at low alt) | yes (back to 200) |
+| mission17 | `cruise_alt_m 15→25` | X_LEG_3 73 m short, drone got stuck at SE-area obstacle for 115 s | yes (back to 15) |
+| mission19 | `--map-half-size 15` (smaller X-pattern) | drone climbed to 26 m then **flipped** during pitched flight, crashed | n/a (CLI flag, not default) |
+
+The trace decile data on mission16 surfaced the real coupling:
+drone tilts forward → cos(tilt) lift loss → altitude drops to 2-3 m
+during pitched flight → drone hits chemical-plant obstacles. Higher
+cruise alt (mission17) just changed which obstacles. Smaller map
+(mission19) made the drone flip on hard-pitched commands.
+
+**What we shipped:**
+
+1. **Flip detection in `mission_demo.Mission.update()`.** Tracks
+   `_flip_tick_count`. If `|roll|>90°` or `|pitch|>90°` AND phase
+   not in {INIT, ARM, DONE}, increment counter. After
+   `FLIP_REQUIRED_TICKS = 25` (0.5 s at 50 Hz) consecutive flipped
+   ticks, log + force `Phase.DONE`. Counter resets on any tick
+   with normal attitude. Avoids false positives from transient
+   gimbal-lock readings during INIT/ARM transitions.
+
+2. **Respawn signal protocol.** When flip-induced DONE fires,
+   `mission_demo` writes `tempfile.gettempdir()/bf_respawn.signal`.
+   The Pegasus orchestrator polls the path ~10 Hz; when present
+   it calls `world.reset()` (returns dynamic prims to initial
+   poses → Iris back at spawn, attitude cleared) then
+   `timeline.play()`, then deletes the signal. Lets the operator
+   iterate mission_demo runs without restarting Pegasus + Iris
+   Sim. `world.reset()` is safe — the BetaflightUdpBackend's
+   `reset()` drains stale UDP packets without closing the socket,
+   so BF SITL in Docker is unaffected.
+
+3. **`--respawn-signal-file` CLI on both `mission_demo` and
+   `final_world_betaflight.py`** so the path can be overridden in
+   lockstep. Default matches; mismatch silently disables the
+   respawn loop.
+
+5 new tests in `TestFlipDetection` (brief flip OK, sustained →
+DONE, counter resets, pitch flip also detected, INIT phase
+skipped). All 22 targeted tests pass.
+
+**Counter-agent reviewed; 2 SHOULD-FIX items applied:**
+- Orchestrator now reads its own `--respawn-signal-file` flag (was
+  hardcoded; would silently disagree with mission_demo's CLI value).
+- mission_demo pre-clears the signal at startup (was: only
+  orchestrator pre-cleared, leaving a window for ghost-signal-
+  triggered respawns).
+
 ### v0.10 — drone flies the X-pattern; X_LEG_2 within 10 m of corner (Apr 28 late night)
 
 Diagnose-before-tune via counter-agent recipe. Added `--waypoint-

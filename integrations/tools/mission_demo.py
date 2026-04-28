@@ -46,9 +46,11 @@ import argparse
 import csv
 import logging
 import math
+import os
 import socket
 import struct
 import sys
+import tempfile
 import time
 from dataclasses import dataclass, field
 from enum import Enum
@@ -108,6 +110,25 @@ _UDP_RC_PACKET = struct.Struct("<d16H")
 assert _UDP_RC_PACKET.size == 40, f"rc_packet must be 40B, got {_UDP_RC_PACKET.size}"
 _NUM_UDP_RC_CHANNELS = 16
 
+# Respawn signal file. mission_demo writes it (touch) when it aborts
+# due to flip detection; the Pegasus orchestrator polls for it and
+# calls world.reset() when present so the drone respawns at its
+# original spawn point. Same tempdir convention as `bf_sim_state.txt`
+# so both processes agree without CLI plumbing.
+DEFAULT_RESPAWN_SIGNAL_FILE = os.path.join(
+    tempfile.gettempdir(), "bf_respawn.signal",
+)
+
+# Target state file. mission_demo writes its current waypoint here
+# every tick (n_m, e_m, alt_m, label) — relative to the home point
+# captured during INIT. The orchestrator reads this and renders a
+# colored sphere at the matching spawn-relative position so the
+# operator can SEE whether the drone is following the controller's
+# intent. Same tempdir convention as the other state files.
+DEFAULT_TARGET_STATE_FILE = os.path.join(
+    tempfile.gettempdir(), "bf_target_state.txt",
+)
+
 
 # ── Phase enum ─────────────────────────────────────────────────────────────
 
@@ -142,7 +163,12 @@ class MissionConfig:
     # The four corners are at (±half, ±half) from home in (north, east) m.
     # Tune to your actual map bounds.
     map_half_size_m: float = 30.0           # tightened from 80 for sim_loop
-    cruise_alt_m: float = 15.0              # was 75; achievable in <60s w/ Iris sim
+    # mission17 (cruise_alt=25) made things worse — drone hit
+    # obstacles in a different part of the chemical plant scene and
+    # X_LEG_3 ended 73 m short. Reverted to 15. The right fix for
+    # the obstacle problem is shrinking the map via `--map-half-size`
+    # (smaller X-pattern = stays in open ground), not raising alt.
+    cruise_alt_m: float = 15.0
     circle_radius_m: float = 15.0
     circle_period_s: float = 30.0          # one full circle in 30 s
     arrival_radius_m: float = 5.0          # waypoint reached when within
@@ -176,10 +202,20 @@ class MissionConfig:
     # 2.0 produced only +74 µs forward stick at distance=37 m; drone
     # stalled 31-34 m from corner because forward thrust was too
     # weak. 4.0 doubles that (pitch_us = 1500 + min(pitch_max,
-    # kp*distance), saturates at distance ≥ pitch_max/kp = 50 m).
+    # kp*distance), saturates at distance ≥ pitch_max/kp).
     # Matches `racer_companion/nav.py::NavTuning` default — the
     # 2.0 here was a mission_demo-specific outlier.
     pitch_kp_per_m: float = 4.0
+    # mission16 tested pitch_max=300 to extend pitch-saturation
+    # range from 50 m to 75 m on the X_LEG_3 long diagonal. Helped
+    # X_LEG_1/3 modestly (e.g., X_LEG_3 41.8→33.7 m short) but the
+    # trace decile data revealed the actual bottleneck: drone tilts
+    # forward → cos(tilt) lift loss → altitude drops to 2-3 m
+    # during pitched flight → drone hits chemical-plant obstacles
+    # at low alt and stalls (X_LEG_3 distance frozen at 33.7 m for
+    # ~30 s). Reverted to 200 because raising it doesn't address
+    # the real coupling problem (TODO #11). Real fix needs altitude/
+    # pitch coupling — ideas in TODO #11.
     pitch_max_us: float = 200.0
     yaw_align_threshold_deg: float = 25.0
 
@@ -314,11 +350,107 @@ class Mission:
         # set by main() if the CLI flag is provided; None otherwise.
         self._waypoint_csv = None
         self._waypoint_csv_fh = None
+        # Flip detection (Apr 29). Iris in Pegasus can flip on
+        # hard-pitched commands when altitude drops below the tilt-
+        # induced lift loss threshold. With runaway_takeoff_
+        # prevention=OFF, BF doesn't auto-detect; mission_demo keeps
+        # sending throttle commands obliviously for the rest of the
+        # CLIMB timeout. Detect via |roll| > 90° or |pitch| > 90°
+        # sustained for `_flip_required_ticks` consecutive ticks
+        # (avoids false positives from transient gimbal-lock readings
+        # at boot or recovery transitions). On detection, log and
+        # force DONE.
+        self._flip_tick_count = 0
+        self.FLIP_ANGLE_DEG = 90.0
+        self.FLIP_REQUIRED_TICKS = 25  # 0.5s at 50Hz
+        # When a flip-induced DONE fires, write a signal file the
+        # orchestrator polls for. Set by main() from the CLI flag;
+        # default is `bf_respawn.signal` in tempdir. None disables
+        # the signal write (the orchestrator simply won't see it).
+        self._respawn_signal_path: str | None = None
+        # Target state file for the orchestrator's in-sim "target
+        # bubble" marker (Apr 29 UX work). Set by main() from CLI
+        # flag; default DEFAULT_TARGET_STATE_FILE. None disables.
+        self._target_state_path: str | None = None
 
     # ── Public interface ────────────────────────────────────────────────
 
+    def _active_target(self, now: float) -> Waypoint | None:
+        """Return the Waypoint the controller is currently chasing, or
+        None if the phase has no target. Used both by the per-phase RC
+        compute and by the target-state-file publisher (Apr 29 in-sim
+        UX work)."""
+        if self.phase in (Phase.X_LEG_1, Phase.X_LEG_2, Phase.X_LEG_3,
+                          Phase.TO_CENTER, Phase.LANDING_APPROACH,
+                          Phase.LANDING_DESCENT):
+            return self._current_target()
+        if self.phase in (Phase.CIRCLE_1, Phase.CIRCLE_2):
+            return self._circle_target(now)
+        return None
+
+    def _publish_target_state(self, now: float) -> None:
+        """Write the current target to the state file the orchestrator
+        polls for the in-sim 'target bubble' marker. Format mirrors
+        bf_sim_state.txt (n e alt yaw label) but yaw is unused so we
+        write 0. Coordinates are home-relative meters in N/E/up.
+        Best-effort — file errors are swallowed."""
+        if not self._target_state_path or self.home is None:
+            return
+        target = self._active_target(now)
+        if target is None:
+            return
+        cos_lat = max(0.05, math.cos(math.radians(self.home.lat_deg)))
+        n_m = (target.lat_deg - self.home.lat_deg) * _M_PER_DEG_LAT
+        e_m = (target.lon_deg - self.home.lon_deg) * _M_PER_DEG_LON_EQUATOR * cos_lat
+        # Target alt is relative-to-home (cruise_alt_m) — same convention
+        # as the mission state machine's _rel_alt() compares against.
+        try:
+            with open(self._target_state_path, "w") as f:
+                f.write(f"{n_m:.3f} {e_m:.3f} {target.alt_m:.3f} {target.label}\n")
+        except OSError:
+            pass
+
     def update(self, snap, now: float) -> None:
         """Advance the state machine. snap is a TelemetrySnapshot."""
+        # Flip detection — only after we've left INIT (during INIT we
+        # might see weird attitude values before BF's first MSP
+        # ATTITUDE response, and we don't want to abort the mission
+        # before it's even started).
+        if self.phase not in (Phase.INIT, Phase.ARM, Phase.DONE) and snap.attitude:
+            roll = abs(snap.attitude.roll_deg)
+            pitch = abs(snap.attitude.pitch_deg)
+            if roll > self.FLIP_ANGLE_DEG or pitch > self.FLIP_ANGLE_DEG:
+                self._flip_tick_count += 1
+                if self._flip_tick_count >= self.FLIP_REQUIRED_TICKS:
+                    log.error(
+                        "[mission] FLIP detected: roll=%.1f° pitch=%.1f° "
+                        "for %d ticks — forcing DONE so the orchestrator "
+                        "can respawn (Pegasus + Iris cannot self-right)",
+                        snap.attitude.roll_deg, snap.attitude.pitch_deg,
+                        self._flip_tick_count,
+                    )
+                    if self._respawn_signal_path:
+                        try:
+                            with open(self._respawn_signal_path, "w") as _f:
+                                _f.write(f"flip {now:.3f}\n")
+                            log.info("[mission] wrote respawn signal: %s",
+                                     self._respawn_signal_path)
+                        except OSError as e:
+                            log.warning("[mission] respawn signal "
+                                        "write failed: %s", e)
+                    self._enter(Phase.DONE, now)
+                    return
+            else:
+                # Reset counter on any tick where attitude is OK so
+                # transient readings don't accumulate.
+                self._flip_tick_count = 0
+
+        # Publish current target for the orchestrator's in-sim
+        # marker. Cheap (one file write per tick at 50 Hz, file size
+        # ~50 B). Pre-INIT phases skip via _active_target returning
+        # None when home isn't locked yet.
+        self._publish_target_state(now)
+
         if self.phase == Phase.INIT:
             self._update_init(snap, now)
         elif self.phase == Phase.ARM:
@@ -778,6 +910,23 @@ def main() -> int:
                         "pitch_us, throttle_us, target). Used to "
                         "diagnose why X_LEG legs time out short of "
                         "corners (TODO #10). Off by default.")
+    p.add_argument("--respawn-signal-file", default=DEFAULT_RESPAWN_SIGNAL_FILE,
+                   help=f"Path to the respawn signal file mission_"
+                        f"demo touches when it aborts due to flip "
+                        f"detection. The Pegasus orchestrator polls "
+                        f"for this file and calls `world.reset()` to "
+                        f"respawn the drone, so the operator can run "
+                        f"mission_demo again without restarting the "
+                        f"sim. Default: {DEFAULT_RESPAWN_SIGNAL_FILE}. "
+                        f"Empty string disables the signal write.")
+    p.add_argument("--target-state-file", default=DEFAULT_TARGET_STATE_FILE,
+                   help=f"Path mission_demo writes its current target "
+                        f"to every tick (n e alt label, home-relative "
+                        f"meters). The Pegasus orchestrator reads this "
+                        f"to position a 'target bubble' sphere in the "
+                        f"sim so the operator can see commanded vs "
+                        f"actual position. Default: {DEFAULT_TARGET_STATE_FILE}. "
+                        f"Empty string disables.")
     args = p.parse_args()
 
     logging.basicConfig(
@@ -794,6 +943,18 @@ def main() -> int:
         loop_hz=args.rate_hz,
     )
     mission = Mission(cfg)
+    mission._respawn_signal_path = args.respawn_signal_file or None
+    mission._target_state_path = args.target_state_file or None
+    # Pre-clear any stale signal from a prior run. Without this,
+    # if a previous mission_demo crashed mid-write or if the
+    # orchestrator missed a poll cycle, the next mission_demo's
+    # first flip-check could trigger an unintended respawn from
+    # a ghost signal file.
+    if mission._respawn_signal_path:
+        try:
+            os.remove(mission._respawn_signal_path)
+        except OSError:
+            pass
 
     log.info("[mission_demo] connecting to BF SITL at tcp://%s:%d",
              cfg.bf_host, cfg.bf_port)

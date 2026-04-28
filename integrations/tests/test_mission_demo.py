@@ -498,5 +498,86 @@ class TestArmSwitchRecovery(unittest.TestCase):
         self.assertEqual(self.m._recovery_ticks, 0)
 
 
+# ── Flip detection ────────────────────────────────────────────────────────
+
+
+class TestFlipDetection(unittest.TestCase):
+    """Iris in Pegasus can flip on hard-pitched commands when altitude
+    drops below the tilt-induced lift loss threshold. With BF's
+    runaway_takeoff_prevention=OFF, BF doesn't auto-detect; mission_
+    demo must spot |roll|>90° or |pitch|>90° sustained for
+    FLIP_REQUIRED_TICKS and force DONE so the orchestrator can
+    respawn the drone."""
+
+    def setUp(self):
+        cfg = md.MissionConfig()
+        self.m = md.Mission(cfg)
+        # Lock home/corners + leave INIT so update() runs the flip
+        # check (it's gated to non-INIT phases).
+        self.m.update(FakeSnap(
+            gps=FakeGps(lat_deg=41.0, lon_deg=-74.0),
+            altitude=FakeAltitude(alt_cm=0),
+            attitude=FakeAttitude(),
+        ), now=0.0)
+        self.m.phase = md.Phase.X_LEG_1
+
+    def _flipped_snap(self, roll_deg=180.0, pitch_deg=0.0):
+        return FakeSnap(
+            gps=FakeGps(lat_deg=41.0, lon_deg=-74.0),
+            altitude=FakeAltitude(alt_cm=500),
+            attitude=FakeAttitude(roll_deg=roll_deg, pitch_deg=pitch_deg),
+        )
+
+    def test_brief_flipped_attitude_does_not_abort(self):
+        # A single tick of attitude > 90° must NOT abort — could be
+        # a transient bad MSP frame or a recovery transition.
+        self.m.update(self._flipped_snap(roll_deg=180.0), now=1.0)
+        self.assertNotEqual(self.m.phase, md.Phase.DONE)
+        self.assertEqual(self.m._flip_tick_count, 1)
+
+    def test_sustained_flip_aborts_to_done(self):
+        # FLIP_REQUIRED_TICKS+1 consecutive flipped ticks → DONE.
+        for i in range(self.m.FLIP_REQUIRED_TICKS + 1):
+            self.m.update(self._flipped_snap(roll_deg=180.0), now=1.0 + i * 0.02)
+        self.assertEqual(self.m.phase, md.Phase.DONE)
+
+    def test_flip_counter_resets_on_normal_attitude(self):
+        # 24 flipped ticks (just under threshold), then 1 normal —
+        # counter resets to 0; mission stays alive.
+        for i in range(self.m.FLIP_REQUIRED_TICKS - 1):
+            self.m.update(self._flipped_snap(roll_deg=180.0), now=1.0 + i * 0.02)
+        self.assertEqual(self.m._flip_tick_count,
+                         self.m.FLIP_REQUIRED_TICKS - 1)
+        # Normal attitude tick.
+        self.m.update(FakeSnap(
+            gps=FakeGps(lat_deg=41.0, lon_deg=-74.0),
+            altitude=FakeAltitude(alt_cm=500),
+            attitude=FakeAttitude(roll_deg=0.0, pitch_deg=0.0),
+        ), now=1.5)
+        self.assertEqual(self.m._flip_tick_count, 0)
+        self.assertNotEqual(self.m.phase, md.Phase.DONE)
+
+    def test_pitch_flip_also_detected(self):
+        # 90°+ pitch (drone pointing straight down or up) is also
+        # a flip. Should trip the same path.
+        for i in range(self.m.FLIP_REQUIRED_TICKS + 1):
+            self.m.update(self._flipped_snap(pitch_deg=120.0), now=1.0 + i * 0.02)
+        self.assertEqual(self.m.phase, md.Phase.DONE)
+
+    def test_init_phase_skips_flip_check(self):
+        # During INIT, attitude readings can be wonky before BF's
+        # first MSP_ATTITUDE response stabilizes. Flip check is
+        # gated to non-INIT phases.
+        m2 = md.Mission(md.MissionConfig())
+        # Don't set home; phase stays INIT.
+        for i in range(m2.FLIP_REQUIRED_TICKS + 5):
+            m2.update(FakeSnap(
+                gps=FakeGps(fix=False),  # keep INIT
+                attitude=FakeAttitude(roll_deg=180.0),
+            ), now=1.0 + i * 0.02)
+        self.assertEqual(m2.phase, md.Phase.INIT)
+        self.assertEqual(m2._flip_tick_count, 0)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -141,6 +141,16 @@ parser.add_argument(
          "we pick is then pushed into the SITL container via "
          "SITL_HOST_MOTOR_PORT and the relay is restarted.",
 )
+parser.add_argument(
+    "--respawn-signal-file", default=None,
+    help="Path to the respawn signal file mission_demo writes when it "
+         "aborts due to flip detection. The orchestrator polls for this "
+         "file ~10 Hz; on detection calls `world.reset()` to return Iris "
+         "to spawn so the operator can rerun mission_demo without "
+         "restarting Pegasus. Default: tempdir/bf_respawn.signal — must "
+         "match mission_demo's --respawn-signal-file value or the two "
+         "processes silently disagree.",
+)
 args = parser.parse_args()
 
 
@@ -530,6 +540,57 @@ def main() -> int:
         config=config,
     )
 
+    # ── In-sim visual UX (Apr 29) ────────────────────────────────
+    # Static colored spheres at spawn + 4 corners + CENTER so the
+    # operator has visible references in Isaac Sim. Plus a dynamic
+    # "target bubble" that the main loop moves to mission_demo's
+    # current waypoint each tick — lets the operator see whether
+    # the drone is following the controller's intent or drifting
+    # independently. Colors:
+    #   spawn  = green
+    #   SW     = blue
+    #   SE     = magenta
+    #   NE     = orange
+    #   NW     = yellow
+    #   CENTER = white
+    #   target = red (dynamic)
+    # Pegasus uses ENU (x=east, y=north, z=up) for spawn coords.
+    # mission_demo's "corner" terminology is in N/E (y=north,
+    # x=east), so SW = (-east, -north) etc. — convert here.
+    from pxr import UsdGeom, Gf
+    import omni.usd
+    stage = omni.usd.get_context().get_stage()
+    sx, sy, sz = float(args.spawn[0]), float(args.spawn[1]), float(args.spawn[2])
+    half = float(args.map_half_size)
+
+    def _make_marker(name: str, x: float, y: float, z: float,
+                     rgb: tuple[float, float, float], radius: float = 2.0):
+        path = f"/World/markers/{name}"
+        sphere = UsdGeom.Sphere.Define(stage, path)
+        sphere.GetRadiusAttr().Set(radius)
+        UsdGeom.XformCommonAPI(sphere.GetPrim()).SetTranslate(
+            Gf.Vec3d(x, y, z),
+        )
+        sphere.GetDisplayColorAttr().Set([Gf.Vec3f(*rgb)])
+        return sphere
+
+    # Mission_demo's corners are N/E offsets from spawn (which becomes
+    # HOME at INIT). In ENU: north→y, east→x.
+    marker_alt = sz + 1.0  # slightly above spawn so spheres aren't buried
+    _make_marker("spawn",  sx,        sy,        sz,         (0.0, 1.0, 0.0), 1.5)
+    _make_marker("SW",     sx - half, sy - half, marker_alt, (0.1, 0.1, 1.0), 2.5)
+    _make_marker("SE",     sx + half, sy - half, marker_alt, (1.0, 0.1, 1.0), 2.5)
+    _make_marker("NE",     sx + half, sy + half, marker_alt, (1.0, 0.5, 0.0), 2.5)
+    _make_marker("NW",     sx - half, sy + half, marker_alt, (1.0, 1.0, 0.0), 2.5)
+    _make_marker("CENTER", sx,        sy,        marker_alt, (1.0, 1.0, 1.0), 1.5)
+    target_marker = _make_marker(
+        "target", sx, sy, marker_alt, (1.0, 0.0, 0.0), 1.0,
+    )
+    target_marker_xform = UsdGeom.XformCommonAPI(target_marker.GetPrim())
+    print(f"[final_world_betaflight] In-sim markers placed: spawn(green), "
+          f"SW(blue), SE(magenta), NE(orange), NW(yellow), CENTER(white), "
+          f"target(red, dynamic). map_half_size={half}m", flush=True)
+
     world.reset()
     print(
         "[final_world_betaflight] World reset; starting timeline. "
@@ -550,10 +611,93 @@ def main() -> int:
     print(f"[final_world_betaflight] Publishing sim state to: {state_file_path}",
           flush=True)
     last_state_write = 0.0
+    # Respawn signal file. mission_demo writes this when it aborts
+    # due to flip detection so the operator can iterate without
+    # restarting Pegasus. We poll for it ~10 Hz; on detection,
+    # call `world.reset()` (returns the drone to its spawn pose)
+    # and delete the signal. The path defaults to a tempdir
+    # convention that matches mission_demo's DEFAULT_RESPAWN_
+    # SIGNAL_FILE so both processes agree out of the box.
+    # Override via --respawn-signal-file when running mission_demo
+    # with a non-default path so they stay in lockstep.
+    respawn_signal_path = (
+        args.respawn_signal_file
+        if args.respawn_signal_file
+        else os.path.join(tempfile.gettempdir(), "bf_respawn.signal")
+    )
+    # Pre-clear any stale signal from a prior run.
+    try:
+        os.remove(respawn_signal_path)
+    except OSError:
+        pass
+    print(f"[final_world_betaflight] Watching respawn signal: "
+          f"{respawn_signal_path}", flush=True)
+    last_respawn_check = 0.0
+    # Target state file the orchestrator polls to position the
+    # red 'target bubble' marker. mission_demo writes to it every
+    # tick: "n e alt label". Position is home-relative meters in
+    # N/E/up. We convert to Pegasus ENU coords (east=x, north=y,
+    # up=z) for the prim translate. ~10 Hz poll matches state file.
+    target_state_path = os.path.join(
+        tempfile.gettempdir(), "bf_target_state.txt",
+    )
+    print(f"[final_world_betaflight] Watching target state: "
+          f"{target_state_path}", flush=True)
+    last_target_check = 0.0
 
     try:
         while simulation_app.is_running():
             world.step(render=True)
+
+            # Respawn signal poll (~10 Hz). When mission_demo aborts
+            # via flip detection it touches the signal file. We
+            # call world.reset() which returns dynamic prims to
+            # their initial poses (Iris back to spawn, attitude
+            # cleared) so the operator can rerun mission_demo
+            # without restarting the whole sim. timeline.play()
+            # after reset because world.reset() pauses the timeline
+            # in some Pegasus versions.
+            now_respawn = time.monotonic()
+            if now_respawn - last_respawn_check >= 0.1:
+                last_respawn_check = now_respawn
+                if os.path.exists(respawn_signal_path):
+                    print(f"[final_world_betaflight] respawn signal "
+                          f"received → world.reset() (Iris returns to "
+                          f"spawn {tuple(args.spawn)})", flush=True)
+                    try:
+                        os.remove(respawn_signal_path)
+                    except OSError:
+                        pass
+                    try:
+                        world.reset()
+                        timeline.play()
+                    except Exception as _e:
+                        print(f"[final_world_betaflight] respawn reset "
+                              f"failed: {_e}", flush=True)
+
+            # Target bubble position update (~10 Hz). mission_demo
+            # writes home-relative N/E/alt to target_state_path each
+            # tick; we read and translate the red marker prim to
+            # match. The home point IS the spawn (mission_demo locks
+            # home from the GPS captured during INIT, which is
+            # synthesized from sim_loop's published state — Pegasus's
+            # spawn position).
+            now_target = time.monotonic()
+            if now_target - last_target_check >= 0.1:
+                last_target_check = now_target
+                try:
+                    with open(target_state_path, "r") as f:
+                        parts = f.read().strip().split(maxsplit=3)
+                    if len(parts) >= 3:
+                        n_m = float(parts[0])
+                        e_m = float(parts[1])
+                        alt_m = float(parts[2])
+                        # ENU translate: east=x, north=y, up=z
+                        target_marker_xform.SetTranslate(
+                            Gf.Vec3d(sx + e_m, sy + n_m, sz + alt_m),
+                        )
+                except (OSError, ValueError):
+                    pass
 
             # Publish ground-truth state for the shim to synthesize
             # MSP_ALTITUDE + MSP_RAW_GPS. ~10 Hz throttle.

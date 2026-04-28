@@ -97,18 +97,30 @@ the context behind each.
     shipped behind `--waypoint-trace-csv` flag for future tuning.
 
 11. **X_LEG_3 (the long SE→NW diagonal) still times out 41.8 m
-    short** — much worse than X_LEG_1/2 in mission15. The leg is
-    ~85 m and pitch saturates at distance ≥ 50 m
-    (`pitch_max_us / pitch_kp_per_m = 200 / 4 = 50 m`). At full
-    saturation the drone has +200 µs forward stick for the first
-    35 m of approach but no headroom beyond.
-    - **Cheap fix to try:** bump `pitch_max_us` from 200 to 300.
-      With `pitch_kp_per_m=4`, full saturation point becomes
-      `300 / 4 = 75 m` — covers most of the long diagonal.
-    - **Less cheap:** add a small Kd term keyed to closing rate so
-      the controller doesn't over-pitch when the drone is already
-      moving forward toward the target.
-    - One variable at a time, per the v0.9 / v0.10 lesson.
+    short** — much worse than X_LEG_1/2 in mission15.
+    - Apr 29 tested 3 fixes; all reverted. See MEMORY.md v0.11
+      for the table. Real coupling: drone pitches forward → cos(tilt)
+      lift loss → altitude drops to 2-3 m → drone hits chemical-
+      plant obstacles. Higher cruise alt and smaller map both
+      moved the obstacle problem rather than fixed it.
+    - **Real next experiment**: keep pitch authority high but add
+      a throttle-Kd term keyed off `vario` (vertical velocity)
+      so altitude doesn't sag during pitched flight. Also
+      possibly an "altitude-priority" boost: when rel_alt drops
+      below `cruise_alt - 5`, override the pitch_us back to
+      neutral until altitude recovers.
+    - The new in-sim target bubble (v0.12) makes this much
+      easier to debug — operator can watch whether the drone is
+      tracking the target or being pulled away by altitude
+      loss.
+
+12. **In-sim visualization breadcrumbs (v0.12 follow-up).** User
+    asked for "every 25 m" markers to show where the controller
+    intended the drone to be. Current implementation only renders
+    the live target bubble. Add a deque of last N target positions
+    rendered as fading-color spheres so the operator sees the
+    commanded path. Cheap: USD prim creation/translate already
+    proven in v0.12.
 
 ## Not doing — rejected ideas
 
