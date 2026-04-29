@@ -1,11 +1,37 @@
-# HANDOFF — Project_Beta_Ardu HITL flight (Apr 27 update)
+# HANDOFF — Project_Beta_Ardu HITL flight (Apr 29 update)
 
 **Audience:** Jeremy (or anyone picking this up cold).
 **Read time:** 5 minutes. Then 10 minutes to reproduce the working stack.
 
+> **Read order for incoming:** this status table → `MEMORY.md` Snapshot
+> v0.17 → `TODO.md` items #16/#17 → `ROADMAP.md` for the version timeline.
+> The Apr 27 status table further below is HISTORICAL — kept for the
+> diagnostic walkthrough on what was broken when, but superseded by
+> the Apr 29 table.
+
 ---
 
-## Status table (Apr 27 13:00 — UPDATED)
+## Status table (Apr 29 12:30 — current)
+
+| Layer | State | Evidence |
+|---|---|---|
+| BF SITL Docker container | ✅ boots clean | `docker logs project-beta-ardu-sitl` → `[sitl] Ready. SITL pid=12` |
+| Bridge wire | ✅ ~80 Hz steady, 0 timeouts | `[bridge] tx=… rx=… (80 Hz) motor w=…` once BF is armed and FDM rate is stable |
+| `mission_demo` X-pattern flight | ✅ flies, but flips during legs | Today's runs: mission flew CLIMB → X_LEG_1 → X_LEG_2 → X_LEG_3 → TO_CENTER, FLIP'd on ground impact during X_LEG_3 / CIRCLE_1 |
+| FPV camera + MP4 recording | ✅ shipped + verified | `Desktop/fpv_mission_20260429_104652.mp4` shows horizon level, sky on top, walkway below; zero gimbal lock warnings |
+| `[phys-truth]` altitude oracle | ✅ shipped | Closed TODO #0; shim altitude path proven faithful end-to-end (±0.4 m at peak across all three sources) |
+| Crash-floor clamp (v0.17) | ⚠️ shipped UNTESTED | Verify run blocked by Vulkan OOM. Patch on `pegasus-bridge` as `3255ae1`. See TODO #16. |
+| **Altitude PID oscillation** | ⚠️ open | Today's fpvfix run: drone overshot 30 m target to 49 m, dove to rel_alt = -7 m, flipped on ground impact. Real fix is Kd term (TODO #17). |
+| **Sim hygiene — BOOT_GRACE_TIME quirk** | ⚠️ open | After `docker compose restart`, BF holds `0x200` until orch FDM ≥ 50 Hz. Pre-warm orch FDM before mission_demo connects. TODO #18. |
+| Companion bug audit (Apr 27) | ⚠️ unchanged | `CH_THROTTLE/CH_YAW` issue from old table is still open; not touched this session. |
+
+**Run cadence today:** v0.16 verify (10:18), v0.16 FPV-fix verify
+(10:46), v0.17 floor-clamp verify (12:08, blocked by GPU OOM).
+Three Isaac Sim launches per session is the ceiling we hit.
+
+---
+
+## Status table (Apr 27 13:00 — HISTORICAL, superseded)
 
 | Layer | State | Evidence |
 |---|---|---|

@@ -4,6 +4,91 @@ What's shipped today, what's deferred, and the trigger that would make us
 revisit each deferred item. Read [`README.md`](README.md) first for the
 architectural picture.
 
+## Shipped — v0.17 (Apr 29 noon 2026, UNTESTED)
+
+- ⚠️ **Crash-floor safety net in `mission_demo`.** Vario tracking
+  (LP-filtered finite-diff, tau=0.5 s) + altitude floor clamp. When
+  in a flying phase AND `rel_alt < 3 m` AND `vario < -0.5 m/s`,
+  forces `thr = hover + 200 µs`. Catches altitude-controller blow-ups
+  before ground impact. Logs `[floor]` warning when active.
+  **UNTESTED** — verify run blocked by Vulkan `OUT_OF_DEVICE_MEMORY`
+  in this session. Verify checklist queued in MEMORY.md / TODO #16.
+
+## Shipped — v0.16 (Apr 29 morning 2026)
+
+- ✅ **`[phys-truth]` orchestrator log line.**
+  `final_world_betaflight.py` prints `bf_backend._latest_state.position`
+  every 5 s. Closed TODO #0 by proving shim altitude path is faithful
+  end-to-end (peak phys-truth=+32.40 m, shim=132.4 m → rel=32.65 m,
+  mission rel_alt=32.76 m — within ±0.4 m). Now the canonical
+  altitude oracle. **DO NOT REMOVE.**
+- ✅ **FPV camera rotation fix.** v0.15's body-local Euler XYZ
+  `(-15, -90, -90)` rotated the image 90° AND sat exactly on the
+  Y=-90 gimbal lock. Replaced with `(75, 0, -90)` — look=+X, up=+Z,
+  15° downtilt, no gimbal lock at any yaw. Verified across yaws
+  0/45/90/180/-90.
+
+## Shipped — v0.15 (Apr 29 evening 2026)
+
+- ✅ **FPV camera tracker.** `--fpv-camera` flag adds a top-level
+  `/World/fpv_camera` whose world transform is set every tick from
+  `bf_backend._latest_state.position` + attitude (composed via
+  scipy `Rotation`). Tracks both position AND yaw — fixes v0.14's
+  bug where the camera was parented under `/World/quadrotor`
+  (which doesn't propagate physics-driven motion).
+- ✅ **MP4 video recording.** `--fpv-video-fps` (default 5) +
+  `--fpv-video-out-dir` (default `~/Desktop`). Per-tick PNG to a
+  temp staging dir; orchestrator `finally:` block ffmpeg-encodes
+  to `fpv_mission_<timestamp>.mp4`. **Default workflow** for
+  confirming control + placement.
+- ✅ **Shutdown signal.** Touch
+  `{tempdir}/bf_orchestrator_shutdown.signal` to break the orch
+  main loop gracefully — required because Stop-Process -Force on
+  Windows skips Python's `finally:` so the encode would never fire.
+
+## Shipped — v0.13 (Apr 29 afternoon 2026)
+
+- ✅ **Tilt-throttle feedforward** in `mission_demo`. When forward
+  pitch is commanded, throttle is boosted proportionally
+  (`tilt_throttle_factor=0.15`) to counter cos(tilt) lift loss.
+  Mission21 dropped X_LEG_3 from 41.8 m short → 14.1 m short.
+  (Suspected co-cause of altitude oscillation per v0.17 analysis;
+  TODO #17 will gate the FF to only fire when below target.)
+
+## Shipped — v0.10–v0.12 (Apr 28 late night 2026)
+
+- ✅ **v0.12 in-sim UX.** Spawn-position green sphere marker + live
+  red target bubble. Operator can see drone vs commanded path.
+- ✅ **v0.11 flip detection + respawn signal.** When roll>thresh OR
+  pitch>thresh for N ticks, mission_demo writes
+  `{tempdir}/bf_respawn.signal`; orch polls every 0.1 s and calls
+  `world.reset()`. Operator can iterate without restarting Pegasus.
+- ✅ **v0.10 lateral controller fix.** `pitch_kp_per_m` 2.0 → 4.0
+  (matches `racer_companion` default). Mission15 X_LEG_2 ended
+  10.3 m from SE corner (vs mission14's 34 m). Also shipped
+  `--waypoint-trace-csv` for future tuning.
+
+## Shipped — v0.8–v0.9 (Apr 28 evening 2026)
+
+- ✅ **v0.9 altitude oscillation fix.** `throttle_kp_per_m`
+  6.0 → 3.0 collapsed altitude amplitude from ±25 m to ±5 m
+  AND eliminated all recovery cycles in mission13. Bonus: proved
+  the bit-1 FAILSAFE pulses were aggressive-throttle artifacts,
+  not a BF timer.
+- ✅ **v0.8.2 recovery flow tuning.** Two-subphase HOLD with
+  hover throttle in the second half (`RECOVERY_HOLD_S=1.5`)
+  dropped recovery count 53 → 3 over 240 s.
+- ✅ **v0.8 dual-write.** `mission_demo` sends RC via MSP TCP
+  AND UDP 9004 every tick. Eliminated chronic RX_FAILSAFE bit-2
+  latch (mission7=0 hits vs mission6=42).
+
+## Shipped — v0.7 (Apr 27 evening 2026)
+
+- ✅ **End-to-end Isaac Sim flight.** `final_world_betaflight.py`
+  orchestrator + `bf_gps_shim` + `mission_demo` flying the
+  X-pattern in the chemical-plant world. ARM_SWITCH latch fixed
+  via shim send-lock + mission_demo two-stage recovery.
+
 ## Shipped — v0.1 (Apr 2026)
 
 - ✅ Architectural plan + 6-phase rollout

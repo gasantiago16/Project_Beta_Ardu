@@ -23,7 +23,98 @@ project state.
 
 ---
 
-## Snapshot — v0.15 (Apr 29 evening 2026, FPV camera + MP4 recording)
+## Snapshot — v0.17 (Apr 29 noon 2026, crash-floor safety net UNTESTED)
+
+| Component | State |
+|---|---|
+| Crash-floor clamp (v0.17) | ⚠️ shipped UNTESTED. `mission_demo` Mission tracks vario via LP-filtered finite-diff (tau=0.5 s); when in a flying phase AND `rel_alt < 3 m` AND `vario < -0.5 m/s`, force throttle to `hover + 200 µs`. Verify run blocked this session by Vulkan `OUT_OF_DEVICE_MEMORY` after 3 Isaac Sim launches. Verify on a fresh boot. |
+| `[phys-truth]` orch log (v0.16) | ✅ shipped. `final_world_betaflight.py` logs `bf_backend._latest_state.position` every 5 s. Canonical altitude oracle. **DO NOT REMOVE** — closes TODO #0 (shim path was always faithful; the v0.15 "rel_alt = half of physics" claim was a stage-browser misread of `/World/quadrotor`, the v0.14 stale-prim bug). |
+| FPV camera rotation (v0.16) | ✅ fixed. Body-local Euler XYZ now `(75, 0, -90)` (was `-15, -90, -90`). Old angles silently mapped camera "up" into the horizontal plane (90° tilt) AND sat exactly on the Y=-90 gimbal lock. New angles: look=+X, up=+Z, 15° downtilt, no gimbal lock at any yaw. |
+| FPV camera tracker (v0.15) | ✅ shipped. Top-level `/World/fpv_camera`, world transform set every tick from `bf_backend._latest_state`. Tracks position AND yaw. |
+| MP4 video recording (v0.15) | ✅ shipped, default workflow. Stop with `touch %TEMP%/bf_orchestrator_shutdown.signal` so `finally:` encodes (Stop-Process -Force skips it). |
+| Tilt-throttle feedforward (v0.13) | ✅ shipped, `tilt_throttle_factor=0.15`. Suspected co-cause of altitude oscillation per v0.17 analysis — investigate before raising. |
+| `mission_demo` UDP 9004 dual-write (v0.8) | ✅ shipped + verified. Default ON. |
+| Chronic RX_FAILSAFE bit-2 latch | ✅ **eliminated** since v0.8. |
+| **Altitude PID oscillation** | ⚠️ underdamped P-only loop. Apr 29 fpvfix run: drone overshot 30 m target to 49 m, then dove uncontrolled to rel_alt=−7 m → ground impact, flip. v0.17 floor clamp is the bandaid; **real fix is a Kd term on vario (TODO #11)**. |
+| Sim hygiene — container retains stale RC | ⚠️ open. After a `docker compose restart` BF SITL holds `BOOT_GRACE_TIME=0x200` until orch FDM reaches ≥50 Hz; if Isaac Sim warmup is GPU-pressured (e.g. session's third launch), BF never arms. Pre-warm orch FDM stream before spawning mission_demo. |
+| Remaining bit-1 FAILSAFE pulses | ⚠️ still open (TODO #2 residual). Recovery flow handles each. |
+
+### v0.17 — crash-floor safety net (Apr 29 noon, UNTESTED)
+
+The Apr 29 morning fpvfix run (commit `4b18019`) showed the altitude
+controller can blow up. Drone climbed past 30 m cruise target to
+49 m, then dove uncontrolled to `rel_alt = −7 m` (drone world z
+~5 m below the chemical-plant ground plane), tumbling on yaw,
+flipped on impact. Underlying cause: kp-only altitude loop with no
+Kd term and a tilt-throttle feedforward that can sustain throttle
+during pitch-heavy legs.
+
+Until Kd lands (TODO #11), there's a safety net so a single
+oscillation half-cycle can't bury the drone. `Mission` now tracks
+`_vario_m_s` via finite-diff `rel_alt` with `dt > 0.1 s` gating and a
+`tau = 0.5 s` low-pass; vario is updated at the top of `compute_rc`
+before all early-return paths (so it stays current across recovery
+cycles). Then a clamp at the bottom: if the phase is a flying phase
+(not INIT/ARM/DONE/LANDING_DESCENT/HANDOVER/LOS_TEST) AND
+`_last_rel_alt < FLOOR_ALT_M=3.0` AND `_vario_m_s < -0.5 m/s`, force
+throttle to `hover + 200 µs` (near max). The clamp won't fight
+recovery (LOW + HOLD `return rc` before reaching it), and logs a
+`[floor]` warning at most every 0.5 s when active.
+
+**Verify blocked this session.** Two consecutive Isaac Sim launches
+hit Vulkan `OUT_OF_DEVICE_MEMORY` (cumulative VRAM pressure across
+the morning's three sessions). After killing all processes (GPU
+back to 0 MiB), the third launch's BF SITL stayed in
+`BOOT_GRACE_TIME` because the orch's render rate fell to ~30 Hz
+(healthy is 80 Hz) and FDM time advance with it. Patch is
+committed (`3255ae1`) for verify on a fresh boot.
+
+**Verify checklist:**
+- [ ] HOME locks at 99.75 m on a fresh container (sim hygiene)
+- [ ] orch `[bridge]` reaches ≥70 Hz steady state
+- [ ] No `Gimbal lock detected` warnings (FPV rotation v0.16
+      verification stays clean)
+- [ ] If altitude oscillation drives drone <3 m AGL descending,
+      `[floor]` log fires and drone catches at ~3 m AGL
+- [ ] No regression vs v0.13 X_LEG_3 14.1 m short baseline
+
+### v0.16 — phys-truth log + FPV rotation fix (Apr 29 morning)
+
+Two related fixes from the TODO #0 verify session.
+
+**`[phys-truth]` log line.** Added to
+`integrations/orchestrators/final_world_betaflight.py`: every 5 s,
+prints `bf_backend._latest_state.position` directly to stdout
+(format: `[phys-truth] z=+32.40m n=+5.47 e=+6.82 yaw=+45.1deg`).
+Reads Pegasus's authoritative physics state, not anything derived.
+Re-running the X-pattern with this active gave aligned peaks across
+three independent sources within ±0.4 m: phys-truth z=+32.40 m,
+shim integrator alt_m=132.4 m (rel = 32.65), mission_demo
+rel_alt=32.76 m. Therefore the shim altitude path is faithful
+end-to-end; the v0.15 "rel_alt = half of physics z" regression
+note was almost certainly a stage-browser read of
+`/World/quadrotor`, which is the named-root prim that doesn't
+track physics (the v0.14 bug we fixed for the FPV camera).
+**TODO #0 closes.** The `[phys-truth]` log is now the canonical
+altitude oracle — DO NOT remove it.
+
+**FPV camera rotation fix.** v0.15's body-local Euler XYZ
+`(-15, -90, -90)` had two problems:
+1. The composed rotation mapped camera "up" into the horizontal
+   plane at drone-yaw=0 — every recorded MP4 image was rotated
+   90° from natural.
+2. The Y=-90 sat exactly on the gimbal-lock singularity, so
+   every frame triggered `Gimbal lock detected` warnings from
+   scipy's `as_euler('xyz')` extraction.
+
+New angles `(75, 0, -90)` give look=+X (drone forward), up=+Z
+(world up), 15° downtilt at drone-yaw=0. Verified across yaws
+0/45/90/180/-90 — no gimbal lock at any orientation. Static
+`SetRotate` at init and main-loop `from_euler` both updated.
+Verify MP4: `Desktop/fpv_mission_20260429_104652.mp4` shows
+horizon level, sky on top.
+
+
 
 | Component | State |
 |---|---|
@@ -102,11 +193,14 @@ ffmpeg=$(python -c "import imageio_ffmpeg as i; print(i.get_ffmpeg_exe())")
   -pix_fmt yuv420p out.mp4
 ```
 
-**Caveat.** This run's mission flight was bad (drone climbed to
-~100 m, throttle below hover at 1602 µs but altitude rising). The
-shim's altitude reading appears to be ~half of true physics
-altitude — controller fights itself. Separate from FPV work.
-v0.14's tilt feedforward + altitude tuning still need iteration.
+**Caveat — DISPROVEN by v0.16.** The "shim altitude reads half of
+physics" claim from this v0.15 verification was wrong. v0.16's
+`[phys-truth]` log re-verified that shim altitude tracks Pegasus
+physics within ±0.4 m end-to-end. The original "half" reading
+came from a stage-browser read of `/World/quadrotor` — the v0.14
+bug we knew about. Real flight-quality issue is altitude PID
+oscillation (TODO #11), not shim path. Kept here for history;
+see v0.16 for the closed-out findings.
 
 ### v0.14 — FPV camera side quest (Apr 29 evening)
 

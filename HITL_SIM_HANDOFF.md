@@ -1,5 +1,18 @@
 # HITL sim — what works, what's flaky, what's next
 
+> **Currency note (Apr 29 2026):** the architecture below is still the
+> live wiring, but the T2 motor-driver has shifted from `sim_loop`
+> (Python 6-DOF) to `final_world_betaflight.py` (Pegasus + Isaac Sim
+> physics + chemical-plant USD world). `sim_loop` still works as a
+> fallback for protocol-level testing without GPU. For current
+> session-scoped status (v0.16 phys-truth log, v0.17 crash-floor
+> UNTESTED), read `MEMORY.md` § Snapshot v0.17 first, then the
+> verify checklists in `TODO.md` items #16–#18. New shortfalls
+> discovered since this doc was written: altitude PID is
+> underdamped (real fix is Kd term — TODO #17), and BF SITL
+> `BOOT_GRACE_TIME` is sensitive to orch FDM rate during the first
+> ~5 s after a container restart (TODO #18).
+
 This doc captures the state of the in-house BF SITL hardware-in-the-loop
 sim for `racer_companion` (Project_Beta_Ardu) as of 2026-04-27. It's
 written for whoever picks this back up — including future-me — so a

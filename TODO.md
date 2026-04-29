@@ -1,6 +1,6 @@
 # TODO
 
-Open items as of v0.15 (Apr 29 evening 2026). See `MEMORY.md` § Snapshot
+Open items as of v0.17 (Apr 29 noon 2026). See `MEMORY.md` § Snapshot
 for the context behind each.
 
 ## High — sim flight quality
@@ -149,6 +149,58 @@ for the context behind each.
     Python's finally on Windows). User direction: use video for
     confirming control + placement going forward, instead of just
     static screenshots.
+
+15. ~~FPV camera 90° tilt + gimbal lock.~~ **DONE v0.16 (Apr 29
+    morning).** v0.15's body-local Euler XYZ `(-15, -90, -90)`
+    silently mapped camera "up" into the horizontal plane (image
+    rotated 90° from natural) AND sat exactly on the Y=-90 gimbal
+    lock (every frame triggered scipy `Gimbal lock detected`).
+    Replaced with `(75, 0, -90)`: look=+X, up=+Z, 15° downtilt at
+    drone-yaw=0, no gimbal lock at any yaw. Verified visually and
+    by zero gimbal warnings across the v0.16 verify run. MP4
+    `Desktop/fpv_mission_20260429_104652.mp4` is the proof.
+
+## High — flight quality (open)
+
+16. **Crash-floor clamp — verify after fresh boot (v0.17 UNTESTED).**
+    Apr 29 noon: shipped vario tracking + crash-floor clamp in
+    `mission_demo` (`rel_alt < 3 m AND vario < -0.5 m/s` in a flying
+    phase forces `thr = hover + 200 µs`). Could not verify in this
+    session — three Isaac Sim launches hit Vulkan
+    `OUT_OF_DEVICE_MEMORY`, fourth launch's BF stuck in
+    `BOOT_GRACE_TIME` because orch FDM rate fell to ~30 Hz. Patch
+    is on `pegasus-bridge` as `3255ae1`. **Next session:** fresh
+    boot, close other GPU apps, re-run X-pattern. Confirm
+    `[floor]` log fires when expected and no regression vs v0.13's
+    X_LEG_3 14.1 m short. If clamp never fires AND drone reaches
+    corners, that's also valid — clamp is dormant safety net.
+
+17. **Altitude PID is underdamped — add Kd term keyed to vario.**
+    Apr 29 fpvfix run: drone overshot 30 m cruise target to 49 m
+    (87% overshoot), then dove uncontrolled to `rel_alt = -7 m`
+    (5 m below world ground), tumbling on yaw, flipped on impact.
+    `_compute_waypoint_rc` uses `kp=3.0` on `rel_alt error` plus
+    a `tilt_throttle_factor=0.15` feedforward — no derivative
+    term. Classic underdamped P-only behavior. Floor clamp (#16)
+    is the bandaid; this is the real fix. Add a Kd term that
+    opposes vario: `t_kd = -kd * vario`, tune kd so a +1 m/s climb
+    rate at zero error yields ~-30-50 µs throttle. Also gate the
+    `tilt_throttle_factor` feedforward to only fire when `err_m
+    > 0` (drone below target) — when drone is already above
+    target, the FF is what's keeping it climbing. Fast win without
+    full Kd: `if err_m > 0: tilt_boost = ...; else: tilt_boost = 0`.
+
+18. **Sim hygiene — pre-warm orch FDM stream so BF clears
+    BOOT_GRACE_TIME.** After a `docker compose restart` BF SITL
+    holds `BOOT_GRACE_TIME=0x200` until orch FDM reaches roughly
+    50 Hz steady. If Isaac Sim warmup is GPU-pressured (third
+    launch in a session), bridge can stall at 30-40 Hz and BF
+    never arms. Cheap mitigation: in `final_world_betaflight.py`,
+    run N=200 `world.step()` ticks BEFORE bf_backend starts
+    publishing FDM, so the FDM stream comes up at full rate from
+    the first packet BF sees. Or even simpler: just wait until
+    `[bridge] tx >= 70 Hz` for 10 s before logging "ready" so the
+    operator knows when to launch mission_demo.
 
 ## Not doing — rejected ideas
 
