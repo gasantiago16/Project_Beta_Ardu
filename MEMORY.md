@@ -49,6 +49,62 @@ project state.
   - Skipped: lift-out-of-snap-gate optimization (premature) and
     BF-restart-reconnect logic (not blocking)
 
+### v0.15 — FPV camera tracks the drone, MP4 video recording (Apr 29 late evening)
+
+User asked: "Is the fpv able to move with the drone?" — and v0.14
+empirically failed: screenshots at drone z=5 m and z=78 m looked
+identical, proving Pegasus's `/World/quadrotor` parent prim doesn't
+inherit physics-driven motion. Pegasus moves a deeper rigid-body
+prim, not the named root.
+
+**Fix.** Moved the FPV camera to top-level `/World/fpv_camera`
+(unparented). Per-tick in the orchestrator main loop, read
+`bf_backend._latest_state` and set the camera's world transform to:
+
+- world position = drone_pos + R(drone_attitude) @ body_offset
+  where body_offset = (0.3, 0, 3.0) in body FLU
+- world rotation = drone_attitude * fpv_body_local_rot
+  where fpv_body_local_rot is the (-15, -90, -90) Euler that maps
+  default USD camera (look -Z, up +Y) to body (look +X, up +Z)
+
+Both composed via scipy `Rotation`, output Euler XYZ to USD.
+
+Verified by re-running with periodic PNG captures: at drone (5 m
+alt, near spawn) the FPV view shows the chemical-plant walkway
+from above; at drone (~80 m alt) the view is mostly sky with the
+ground markers as tiny dots. Camera tracks position AND orientation.
+
+**MP4 video recording.** User request: "save the recordings in
+new file my desktop, do that from now on." Added `--fpv-video-fps`
+(default 5) + `--fpv-video-out-dir` (default `~/Desktop`). Each
+tick captures a numbered PNG to a temp staging dir; on graceful
+shutdown the `finally:` block runs ffmpeg (bundled via
+`imageio_ffmpeg`) to encode `fpv_mission_<timestamp>.mp4`. Frames
+are deleted on success, preserved if encode fails.
+
+**Shutdown signal mechanism.** Stop-Process -Force ==
+TerminateProcess on Windows; Python's `finally:` does NOT run, so
+the encode would never fire after a force-kill. Added a polling
+mechanism: orchestrator watches
+`{tempdir}/bf_orchestrator_shutdown.signal`. Touch the file → main
+loop breaks naturally → finally runs → MP4 lands on Desktop.
+
+**Stale-frames recovery.** If the orchestrator crashes hard
+without running `finally:`, the staged frames live in
+`{tempdir}/fpv_video_frames_*/` and can be encoded manually:
+
+```
+ffmpeg=$(python -c "import imageio_ffmpeg as i; print(i.get_ffmpeg_exe())")
+"$ffmpeg" -framerate 5 -i frame_%06d.png -c:v libx264 \
+  -pix_fmt yuv420p out.mp4
+```
+
+**Caveat.** This run's mission flight was bad (drone climbed to
+~100 m, throttle below hover at 1602 µs but altitude rising). The
+shim's altitude reading appears to be ~half of true physics
+altitude — controller fights itself. Separate from FPV work.
+v0.14's tilt feedforward + altitude tuning still need iteration.
+
 ### v0.14 — FPV camera side quest (Apr 29 evening)
 
 User asked: "could we put the camera in fpv mode so we can see what

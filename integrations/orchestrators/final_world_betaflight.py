@@ -56,9 +56,11 @@ not reachable from inside Docker, etc.).
 """
 import argparse
 import os
+import shutil
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -159,6 +161,29 @@ parser.add_argument(
          "Default off (third-person Isaac Sim viewport). Position/"
          "rotation tuned for Iris airframe; tweak in-source if mounting "
          "a different airframe.",
+)
+parser.add_argument(
+    "--fpv-screenshot-interval-s", type=float, default=0.0,
+    help="If >0 and --fpv-camera is set, capture the active viewport "
+         "to a numbered PNG (fpv_t001.png, fpv_t002.png, ...) every N "
+         "seconds. Used to verify the camera tracks the drone across "
+         "different positions. 0 disables (default — only the one-"
+         "shot post-warmup capture runs).",
+)
+parser.add_argument(
+    "--fpv-video-fps", type=float, default=5.0,
+    help="If >0 and --fpv-camera is set, record the FPV viewport as "
+         "an MP4 at this frame rate. Frames are captured per-tick to "
+         "a temp dir, then ffmpeg-encoded to MP4 on shutdown. Saved "
+         "to --fpv-video-out-dir with a timestamped filename. 0 "
+         "disables. Default 5 — every --fpv-camera run produces a "
+         "video for control + placement review.",
+)
+parser.add_argument(
+    "--fpv-video-out-dir", type=str,
+    default=str(Path.home() / "Desktop"),
+    help="Directory to drop the encoded MP4 into. Default: user "
+         "Desktop. Created if missing.",
 )
 args = parser.parse_args()
 
@@ -624,6 +649,7 @@ def main() -> int:
     # debug camera first; if operator sees the spawn area, viewport
     # API is fine and we can iterate the drone-parented camera.
     if args.fpv_camera:
+        from scipy.spatial.transform import Rotation as _R_for_fpv
         # World-fixed debug camera (NOT parented under drone)
         debug_path = "/World/debug_world_camera"
         debug_cam = UsdGeom.Camera.Define(stage, debug_path)
@@ -648,23 +674,37 @@ def main() -> int:
         # camera follows and the view changes naturally. Rotation
         # X=-15° pitch-down + Y=-90° yaw so default -Z look maps
         # to body +X (forward) with FPV-racer downtilt.
-        fpv_path = "/World/quadrotor/fpv_camera"
+        # FPV camera at TOP LEVEL (NOT under /World/quadrotor).
+        # Pegasus's `/World/quadrotor` prim's transform stays at
+        # identity even when the drone flies — physics moves a
+        # nested rigid-body prim, not the parent. So a child camera
+        # under /World/quadrotor stayed at spawn forever (verified:
+        # screenshots at z=-0.2 and z=17.5 looked identical). The
+        # main loop now reads `bf_backend._latest_state` and
+        # explicitly translates+rotates this camera every tick to
+        # `drone_pos + R(drone_attitude) * body_offset`.
+        fpv_path = "/World/fpv_camera"
         fpv = UsdGeom.Camera.Define(stage, fpv_path)
+        # Initial pose at spawn so the post-warmup screenshot has a
+        # sensible view; the main-loop tracker takes over once
+        # bf_backend has state.
         UsdGeom.XformCommonAPI(fpv.GetPrim()).SetTranslate(
-            Gf.Vec3d(0.3, 0.0, 3.0),
+            Gf.Vec3d(sx + 0.3, sy, sz + 3.0),
         )
-        # USD XformCommonAPI XYZ rotation order, gimbal lock at
-        # Y=-90: Z rotation locks with X about the view axis. Z=+90
-        # rolled the image to body -Z (down) — wrong direction. Z=-90
-        # rolls camera up to body +Z (up). Decomposed: at Y=-90,
-        # increasing Z by 90° rotates camera-up CCW about body +X.
-        # We need camera-up = body +Z, so Z=-90.
         UsdGeom.XformCommonAPI(fpv.GetPrim()).SetRotate(
             Gf.Vec3f(-15.0, -90.0, -90.0),
         )
         # 14 mm focal ≈ 105° HFOV (FPV racer typical).
         fpv.GetFocalLengthAttr().Set(14.0)
         fpv.GetClippingRangeAttr().Set(Gf.Vec2f(0.05, 10000.0))
+        # Stash the body-local FPV camera rotation as a Rotation so
+        # the main-loop tracker can compose drone_attitude * fpv.
+        # XYZ Euler (-15, -90, -90) maps default USD camera (look
+        # -Z, up +Y) to body (look +X, up +Z, 15° pitch-down).
+        fpv_body_local_rot = _R_for_fpv.from_euler(
+            "xyz", [-15.0, -90.0, -90.0], degrees=True,
+        )
+        fpv_body_offset = (0.3, 0.0, 3.0)
 
         try:
             from omni.kit.viewport.utility import get_active_viewport
@@ -721,11 +761,45 @@ def main() -> int:
     last_stats_t = time.monotonic()
     last_stats = bf_backend.stats()
 
+    # Periodic FPV screenshot capture — only active when the
+    # --fpv-camera flag is set. Saves a numbered PNG every
+    # `args.fpv_screenshot_interval_s` so the camera-tracks-drone
+    # behavior can be verified by reading the sequence (mid-air vs
+    # landed-at-new-position). 0 disables. Saved into the project
+    # root next to the original `fpv_screenshot.png` baseline.
+    fpv_periodic_dir = Path(__file__).resolve().parents[2]
+    last_fpv_capture_t = time.monotonic()
+    fpv_capture_count = 0
+
+    # FPV video recording — active when --fpv-camera is set and
+    # --fpv-video-fps > 0 (default 5). Frames captured per-tick to a
+    # temp dir; on shutdown the `finally:` block ffmpeg-encodes them
+    # into an MP4 in --fpv-video-out-dir (default: Desktop). The
+    # temp dir + frame count are tracked here so the finally clause
+    # can find them.
+    fpv_video_active = bool(
+        args.fpv_camera and args.fpv_video_fps > 0
+    )
+    fpv_video_frames_dir = None
+    fpv_video_frame_count = 0
+    fpv_video_last_capture_t = 0.0
+    fpv_video_frame_dt = 0.0
+    fpv_video_out_path = None
+    if fpv_video_active:
+        fpv_video_frames_dir = tempfile.mkdtemp(prefix="fpv_video_frames_")
+        fpv_video_frame_dt = 1.0 / float(args.fpv_video_fps)
+        fpv_video_out_dir = Path(args.fpv_video_out_dir)
+        fpv_video_out_dir.mkdir(parents=True, exist_ok=True)
+        _ts = time.strftime("%Y%m%d_%H%M%S")
+        fpv_video_out_path = fpv_video_out_dir / f"fpv_mission_{_ts}.mp4"
+        print(f"[fpv-video] recording {args.fpv_video_fps:.1f} fps → "
+              f"{fpv_video_out_path} (frames staged in "
+              f"{fpv_video_frames_dir})", flush=True)
+
     # State file path — same default as sim_loop / bf_gps_shim. The shim
     # reads this for ground-truth position when synthesizing MSP_ALTITUDE
     # responses. With Pegasus driving the physics here (instead of
     # sim_loop), we publish from bf_backend._latest_state.
-    import tempfile
     state_file_path = os.path.join(tempfile.gettempdir(), "bf_sim_state.txt")
     print(f"[final_world_betaflight] Publishing sim state to: {state_file_path}",
           flush=True)
@@ -764,9 +838,43 @@ def main() -> int:
           f"{target_state_path}", flush=True)
     last_target_check = 0.0
 
+    # Shutdown signal — touch this file from another process to ask
+    # the orchestrator to break out of its main loop and run the
+    # `finally:` clause. That's the only reliable way on Windows to
+    # trigger the FPV-video encode-on-shutdown without a force-kill
+    # that skips it. (Stop-Process -Force == TerminateProcess; no
+    # Python finally runs.) Pre-clear stale signal at startup.
+    shutdown_signal_path = os.path.join(
+        tempfile.gettempdir(), "bf_orchestrator_shutdown.signal",
+    )
     try:
-        while simulation_app.is_running():
+        os.remove(shutdown_signal_path)
+    except OSError:
+        pass
+    print(f"[final_world_betaflight] Watching shutdown signal: "
+          f"{shutdown_signal_path}", flush=True)
+    last_shutdown_check = 0.0
+    shutdown_requested = False
+
+    try:
+        while simulation_app.is_running() and not shutdown_requested:
             world.step(render=True)
+
+            # Shutdown signal poll (~2 Hz — file existence check is
+            # cheap; this is the canonical way to stop the orch
+            # gracefully on Windows).
+            now_shutdown = time.monotonic()
+            if now_shutdown - last_shutdown_check >= 0.5:
+                last_shutdown_check = now_shutdown
+                if os.path.exists(shutdown_signal_path):
+                    print("[final_world_betaflight] shutdown signal "
+                          "received → exiting main loop", flush=True)
+                    try:
+                        os.remove(shutdown_signal_path)
+                    except OSError:
+                        pass
+                    shutdown_requested = True
+                    continue
 
             # Respawn signal poll (~10 Hz). When mission_demo aborts
             # via flip detection it touches the signal file. We
@@ -842,6 +950,104 @@ def main() -> int:
                     except (OSError, AttributeError):
                         pass
 
+            # FPV camera tracker. /World/quadrotor doesn't propagate
+            # physics-driven motion to its children, so we manually
+            # match the camera's world transform to the drone every
+            # tick. Body-frame offset (0.3, 0, 3.0) is rotated into
+            # world by drone attitude; FPV-view body rotation is
+            # composed with drone attitude so the camera looks the
+            # way the drone is pointing.
+            if args.fpv_camera:
+                _st = bf_backend._latest_state
+                if _st is not None:
+                    try:
+                        from scipy.spatial.transform import Rotation as _R
+                        _drone_q = _R.from_quat(_st.attitude)
+                        _ofs_world = _drone_q.apply(fpv_body_offset)
+                        _cam_pos = (
+                            _st.position[0] + _ofs_world[0],
+                            _st.position[1] + _ofs_world[1],
+                            _st.position[2] + _ofs_world[2],
+                        )
+                        _cam_rot = (_drone_q * fpv_body_local_rot).as_euler(
+                            "xyz", degrees=True,
+                        )
+                        UsdGeom.XformCommonAPI(fpv.GetPrim()).SetTranslate(
+                            Gf.Vec3d(*_cam_pos),
+                        )
+                        UsdGeom.XformCommonAPI(fpv.GetPrim()).SetRotate(
+                            Gf.Vec3f(
+                                float(_cam_rot[0]),
+                                float(_cam_rot[1]),
+                                float(_cam_rot[2]),
+                            ),
+                        )
+                    except (AttributeError, ValueError):
+                        pass
+
+            # FPV video frame capture. Per-tick check: if it's been
+            # ≥1/fps since the last frame, capture another. The
+            # in-flight overhead is one PNG write per frame; the
+            # MP4 encode happens once on shutdown.
+            if fpv_video_active:
+                _now_v = time.monotonic()
+                if _now_v - fpv_video_last_capture_t >= fpv_video_frame_dt:
+                    fpv_video_last_capture_t = _now_v
+                    try:
+                        from omni.kit.viewport.utility import (
+                            capture_viewport_to_file,
+                            get_active_viewport,
+                        )
+                        _vp = get_active_viewport()
+                        _frame_path = os.path.join(
+                            fpv_video_frames_dir,
+                            f"frame_{fpv_video_frame_count:06d}.png",
+                        )
+                        capture_viewport_to_file(_vp, _frame_path)
+                        fpv_video_frame_count += 1
+                    except Exception as _e:
+                        # Non-fatal — keep flying even if a frame drops.
+                        if fpv_video_frame_count % 50 == 0:
+                            print(f"[fpv-video] frame capture failed "
+                                  f"(non-fatal): {_e}", flush=True)
+
+            # Periodic FPV screenshot capture. Only fires when
+            # --fpv-camera is set AND interval > 0. Numbered files
+            # let us compare camera position across drone states.
+            if args.fpv_camera and args.fpv_screenshot_interval_s > 0:
+                now_fpv = time.monotonic()
+                if now_fpv - last_fpv_capture_t >= args.fpv_screenshot_interval_s:
+                    last_fpv_capture_t = now_fpv
+                    fpv_capture_count += 1
+                    try:
+                        from omni.kit.viewport.utility import (
+                            capture_viewport_to_file,
+                            get_active_viewport,
+                        )
+                        _vp = get_active_viewport()
+                        _path = str(
+                            fpv_periodic_dir
+                            / f"fpv_t{fpv_capture_count:03d}.png"
+                        )
+                        capture_viewport_to_file(_vp, _path)
+                        # Include drone position so we can correlate
+                        # the screenshot with where the drone was.
+                        st = bf_backend._latest_state
+                        if st is not None:
+                            print(
+                                f"[fpv] t#{fpv_capture_count:03d} "
+                                f"pos=({st.position[0]:.1f}, "
+                                f"{st.position[1]:.1f}, "
+                                f"{st.position[2]:.1f}) → {_path}",
+                                flush=True,
+                            )
+                        else:
+                            print(f"[fpv] t#{fpv_capture_count:03d} "
+                                  f"→ {_path}", flush=True)
+                    except Exception as _e:
+                        print(f"[fpv] capture failed: {_e}",
+                              flush=True)
+
             # Periodic bridge-health log. 0 disables.
             if args.stats_interval_s > 0:
                 now = time.monotonic()
@@ -866,6 +1072,47 @@ def main() -> int:
     except KeyboardInterrupt:
         print("[final_world_betaflight] Interrupted", flush=True)
     finally:
+        # FPV video encode-on-shutdown. Even if the run was killed
+        # mid-mission, encode whatever frames we got. Keep this
+        # before timeline.stop() / simulation_app.close() so any
+        # error here doesn't leak into the sim shutdown logs.
+        if fpv_video_active and fpv_video_frame_count > 0:
+            try:
+                import imageio_ffmpeg
+                ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
+                pattern = os.path.join(
+                    fpv_video_frames_dir, "frame_%06d.png",
+                )
+                cmd = [
+                    ffmpeg_exe, "-y",
+                    "-framerate", str(args.fpv_video_fps),
+                    "-i", pattern,
+                    "-c:v", "libx264",
+                    "-pix_fmt", "yuv420p",
+                    "-movflags", "+faststart",
+                    str(fpv_video_out_path),
+                ]
+                print(f"[fpv-video] encoding {fpv_video_frame_count} "
+                      f"frames → {fpv_video_out_path}", flush=True)
+                subprocess.run(cmd, check=True,
+                               capture_output=True, text=True)
+                print(f"[fpv-video] saved → {fpv_video_out_path}",
+                      flush=True)
+            except Exception as _e:
+                print(f"[fpv-video] encode failed: {_e}", flush=True)
+                print(f"[fpv-video] frames preserved at "
+                      f"{fpv_video_frames_dir} for manual encoding",
+                      flush=True)
+            else:
+                # Encode succeeded — clean up temp frames.
+                try:
+                    shutil.rmtree(fpv_video_frames_dir)
+                except OSError:
+                    pass
+        elif fpv_video_active:
+            print("[fpv-video] no frames captured; skipping encode",
+                  flush=True)
+
         timeline.stop()
         simulation_app.close()
     return 0

@@ -113,16 +113,25 @@ the context behind each.
     commanded path. Cheap: USD prim creation/translate already
     proven in v0.12.
 
-13. ~~FPV camera side quest.~~ **DONE v0.14 (Apr 29 evening).**
-    `--fpv-camera` flag adds two cameras: world-fixed
-    `/World/debug_world_camera` and drone-parented
-    `/World/quadrotor/fpv_camera`. Body-local (0.3, 0, 3.0) clears
-    the chemical-plant walkway above spawn. Rotation
-    `(-15, -90, -90)` for upright forward FPV view (Y=-90 gimbal-
-    locks Z+X about the view axis; Z=-90 gives camera-up = body
-    +Z). Programmatic `capture_viewport_to_file` after warm-up
-    ticks lets us verify orientation without an operator in the
-    loop.
+13. ~~FPV camera side quest.~~ **DONE v0.15 (Apr 29 late evening).**
+    v0.14 added `--fpv-camera` but the camera was parented under
+    `/World/quadrotor` which DOES NOT track physics — Pegasus moves
+    a deeper rigid-body prim. v0.15 moved camera to top-level
+    `/World/fpv_camera` and updates its world transform every tick
+    from `bf_backend._latest_state.position` + attitude. Verified:
+    z=5 m capture vs z=80 m capture render radically different
+    views.
+
+14. ~~FPV mission video recording.~~ **DONE v0.15.** `--fpv-video-fps`
+    (default 5) + `--fpv-video-out-dir` (default `~/Desktop`)
+    capture per-tick PNGs to a temp staging dir, encode to MP4 via
+    `imageio_ffmpeg` in the orchestrator's `finally:` block.
+    Shutdown signal at
+    `{tempdir}/bf_orchestrator_shutdown.signal` lets external
+    processes ask for graceful exit (Stop-Process -Force skips
+    Python's finally on Windows). User direction: use video for
+    confirming control + placement going forward, instead of just
+    static screenshots.
 
 ## Not doing — rejected ideas
 
