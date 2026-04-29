@@ -23,15 +23,18 @@ project state.
 
 ---
 
-## Snapshot — v0.8 (Apr 28 PM 2026, dual-write kills chronic RX_FAILSAFE)
+## Snapshot — v0.15 (Apr 29 evening 2026, FPV camera + MP4 recording)
 
 | Component | State |
 |---|---|
-| `mission_demo` UDP 9004 dual-write (TODO #1a) | ✅ shipped + verified. Same RC values flow to both MSP TCP 5761 and UDP 9004 every tick. Default ON; `--no-udp-rc` to disable. |
-| Chronic RX_FAILSAFE bit-2 latch | ✅ **eliminated**. mission7 = 0 RX_FAILSAFE hits in 240 s of `[rc]` logs. mission6 (yesterday, same setup minus dual-write) = 42 hits. Architecturally clean fix — single source of truth for RC means no precedence fight. |
-| `bf_rc_keepalive` standalone tool | ⚠️ obsoleted by dual-write but kept in tree for HANDOVER-phase pilot-input testing. Wire format pin still useful. |
-| Remaining bit-1 FAILSAFE pulses | ⚠️ open. Mission7 had ~10 s recovery cadence vs mission6's ~25-30 s — actually faster, with `flags=0x2000080` (THROTTLE+ARM_SWITCH) and `0x2000082` (FAILSAFE+THROTTLE+ARM_SWITCH) showing. Source unknown — separate from RX state machine. Recovery flow handles each. |
-| X-pattern flight quality | comparable to mission6. Drone alive 240 s, climbs to 27 m peak, sustained 5-17 m through CIRCLE_2 phase. Legs still time out 33-42 m short of corners. |
+| FPV camera (`--fpv-camera`) | ✅ shipped. Top-level `/World/fpv_camera`, world transform updated every tick from `bf_backend._latest_state.position` + attitude (composed via scipy). Tracks position AND yaw. Verified empirically — z=5m vs z=80m render radically different views. |
+| MP4 video recording (`--fpv-video-fps`, default 5) | ✅ shipped. Per-tick PNG capture to `{tempdir}/fpv_video_frames_*/`; orchestrator `finally:` block ffmpeg-encodes via `imageio_ffmpeg` to `~/Desktop/fpv_mission_<timestamp>.mp4`. **Now the default workflow for confirming control + placement** (per user direction). |
+| Shutdown signal | ✅ shipped. Touch `{tempdir}/bf_orchestrator_shutdown.signal` to ask orchestrator to exit gracefully — required because Stop-Process -Force on Windows skips Python's `finally:` so the MP4 encode would never fire. |
+| Tilt-throttle feedforward (v0.13) | ✅ shipped, `tilt_throttle_factor=0.15`. mission21 X_LEG_3 41.8→14.1m short. |
+| `mission_demo` UDP 9004 dual-write (v0.8) | ✅ shipped + verified. Default ON. |
+| Chronic RX_FAILSAFE bit-2 latch | ✅ **eliminated** since v0.8. |
+| **Mission flight quality regression flagged** | ⚠️ **NEW.** During v0.15's FPV verification run, drone climbed to 100m at throttle 1602 µs (below hover ~1641 — controller fighting itself). Shim's altitude reads about half of true physics altitude. Separate from FPV work. **Next session candidate.** |
+| Remaining bit-1 FAILSAFE pulses | ⚠️ still open. Recovery flow handles each. |
 
 ### v0.8 changes — what landed in this session (Apr 28 PM)
 

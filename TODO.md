@@ -1,9 +1,22 @@
 # TODO
 
-Open items as of v0.8 (Apr 28 PM 2026). See `MEMORY.md` § Snapshot for
-the context behind each.
+Open items as of v0.15 (Apr 29 evening 2026). See `MEMORY.md` § Snapshot
+for the context behind each.
 
 ## High — sim flight quality
+
+0. **Shim altitude vs physics altitude divergence (NEW v0.15).** During
+   the FPV verification run, mission_demo's `rel_alt` reading was ~half
+   of `bf_backend._latest_state.position[2]` (rel_alt=36 m when physics
+   z=78 m). Controller responds to the shim reading, so it commanded
+   throttle below hover (1602 µs) while the drone was actually still
+   climbing — closed the loop on the wrong altitude. Likely root: the
+   shim's MSP_ALTITUDE synthesis from `bf_sim_state.txt` is reading the
+   wrong column or wrong unit. Next session: instrument shim altitude
+   computation alongside the physics state, confirm divergence, fix at
+   source. Blocks all flight-quality work that depends on accurate
+   altitude (which is most of it).
+
 
 1. ~~Chronic RX_FAILSAFE bit-2 latch.~~ **CLOSED Apr 28 PM** by the
    `mission_demo` UDP 9004 dual-write (yesterday's 1a). Verified
