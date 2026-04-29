@@ -240,6 +240,20 @@ class MissionConfig:
     # so the THROTTLE arming-disable flag clears before AUX1 high
     # triggers the ARM box.
     throttle_idle_us: int = 950
+    # Tilt-throttle feedforward (Apr 29, addresses TODO #11).
+    # mission16 trace showed drone altitude sagging to 2-3 m during
+    # pitched flight because cos(tilt) reduces vertical thrust faster
+    # than the pure-P altitude controller can compensate. This factor
+    # boosts throttle when forward pitch is commanded — feedforward
+    # of the predicted lift loss, runs ALONGSIDE the existing P
+    # controller (which still handles steady-state and disturbances).
+    # mission20 with 0.25 was too aggressive: combined with alt P
+    # (which also pushes throttle up when below target), throttle
+    # saturated and drone climbed to 37-43m peaks then crashed to 0m
+    # in multiple cycles. 0.15 gives +30µs at full +200µs pitch =
+    # ~2% throttle boost ≈ compensates for ~11° tilt; the alt P term
+    # picks up the slack at higher tilts. Set to 0 to disable.
+    tilt_throttle_factor: float = 0.15
 
 
 # ── Map waypoints ──────────────────────────────────────────────────────────
@@ -831,16 +845,23 @@ class Mission:
                                    self.cfg.pitch_kp_per_m * distance))
             rc[SLOT_PITCH] = int(round(PWM_MID + forward))
         else:
+            forward = 0.0
             rc[SLOT_PITCH] = PWM_MID
         # Altitude hold via throttle. target.alt_m is the cruise altitude
         # (a relative value). Compare against rel_alt, not absolute alt.
+        # Pure-P from altitude error PLUS a tilt-feedforward term that
+        # boosts throttle when forward pitch is commanded — counters
+        # the cos(tilt) lift loss that mission16 trace showed sinking
+        # the drone to 2-3 m and into chemical-plant obstacles.
         rel = self._rel_alt(snap)
         if rel is not None:
             err_m = target.alt_m - rel
-            t_offset = max(-self.cfg.throttle_max_offset,
-                           min(self.cfg.throttle_max_offset,
-                               int(self.cfg.throttle_kp_per_m * err_m)))
-            rc[SLOT_THROTTLE] = self.cfg.throttle_hover_us + t_offset
+            t_offset = int(self.cfg.throttle_kp_per_m * err_m)
+            tilt_boost = int(forward * self.cfg.tilt_throttle_factor)
+            t_total = max(-self.cfg.throttle_max_offset,
+                          min(self.cfg.throttle_max_offset,
+                              t_offset + tilt_boost))
+            rc[SLOT_THROTTLE] = self.cfg.throttle_hover_us + t_total
         else:
             rc[SLOT_THROTTLE] = self.cfg.throttle_hover_us
         # Per-tick diagnostic trace (TODO #10). Captures the

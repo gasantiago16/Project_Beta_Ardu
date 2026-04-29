@@ -382,6 +382,83 @@ class TestComputeRc(unittest.TestCase):
         self.assertAlmostEqual(rc[2], 1500, delta=20)
 
 
+# ── Tilt-throttle feedforward ─────────────────────────────────────────────
+
+
+class TestTiltThrottleFeedforward(unittest.TestCase):
+    """When mission_demo commands forward pitch, throttle must
+    simultaneously boost to counter the cos(tilt) lift loss. Without
+    this, mission16 showed altitude sagging to 2-3 m and the drone
+    hitting chemical-plant obstacles. Pure-P altitude controller is
+    too slow to react after the sag has already happened."""
+
+    def setUp(self):
+        cfg = md.MissionConfig()
+        # Override hover for predictable arithmetic in assertions.
+        cfg.throttle_hover_us = 1500
+        cfg.throttle_kp_per_m = 0  # disable altitude P so we can
+                                    # measure the feedforward in isolation
+        self.m = md.Mission(cfg)
+        # Lock home + corners.
+        self.m.update(FakeSnap(
+            gps=FakeGps(lat_deg=41.0, lon_deg=-74.0),
+            altitude=FakeAltitude(alt_cm=0),
+            attitude=FakeAttitude(),
+        ), now=0.0)
+
+    def test_hover_with_no_pitch_no_throttle_boost(self):
+        # Drone at target, no forward command (yaw not aligned →
+        # forward=0, no tilt boost). Throttle = hover exactly.
+        self.m.phase = md.Phase.X_LEG_1
+        snap = FakeSnap(
+            gps=FakeGps(lat_deg=41.0, lon_deg=-74.0),
+            altitude=FakeAltitude(alt_cm=int(
+                self.m.cfg.cruise_alt_m * 100)),  # at target
+            attitude=FakeAttitude(yaw_deg=180.0),  # 180° off → forward=0
+        )
+        rc = self.m.compute_rc(snap, now=1.0)
+        self.assertEqual(rc[md.SLOT_THROTTLE], self.m.cfg.throttle_hover_us)
+
+    def test_forward_pitch_adds_throttle_proportional_boost(self):
+        # When commanding forward pitch (yaw aligned, distance > 0),
+        # throttle must be ABOVE hover by tilt_throttle_factor × forward.
+        from racer_companion import nav
+        ne = self.m.corners["NE"]
+        bearing = nav.bearing_deg(41.0, -74.0, ne.lat_deg, ne.lon_deg)
+        snap = FakeSnap(
+            gps=FakeGps(lat_deg=41.0, lon_deg=-74.0),
+            altitude=FakeAltitude(alt_cm=int(
+                self.m.cfg.cruise_alt_m * 100)),  # at target alt
+            attitude=FakeAttitude(yaw_deg=bearing),  # aligned
+        )
+        self.m.phase = md.Phase.X_LEG_1
+        rc = self.m.compute_rc(snap, now=1.0)
+        # forward = pitch_kp_per_m * distance, clamped to pitch_max_us
+        forward = rc[md.SLOT_PITCH] - md.PWM_MID
+        expected_boost = int(forward * self.m.cfg.tilt_throttle_factor)
+        self.assertEqual(rc[md.SLOT_THROTTLE],
+                         self.m.cfg.throttle_hover_us + expected_boost)
+        self.assertGreater(rc[md.SLOT_THROTTLE], self.m.cfg.throttle_hover_us,
+                           "tilt comp must lift throttle above hover")
+
+    def test_disabled_when_factor_zero(self):
+        # Setting tilt_throttle_factor = 0 should make throttle
+        # ignore commanded pitch (only altitude P drives it).
+        self.m.cfg.tilt_throttle_factor = 0.0
+        from racer_companion import nav
+        ne = self.m.corners["NE"]
+        bearing = nav.bearing_deg(41.0, -74.0, ne.lat_deg, ne.lon_deg)
+        snap = FakeSnap(
+            gps=FakeGps(lat_deg=41.0, lon_deg=-74.0),
+            altitude=FakeAltitude(alt_cm=int(
+                self.m.cfg.cruise_alt_m * 100)),
+            attitude=FakeAttitude(yaw_deg=bearing),
+        )
+        self.m.phase = md.Phase.X_LEG_1
+        rc = self.m.compute_rc(snap, now=1.0)
+        self.assertEqual(rc[md.SLOT_THROTTLE], self.m.cfg.throttle_hover_us)
+
+
 # ── ARM_SWITCH-latch recovery ─────────────────────────────────────────────
 
 

@@ -444,6 +444,7 @@ simulation_app = SimulationApp({
 
 import omni  # noqa: E402
 import omni.timeline  # noqa: E402
+import omni.usd  # noqa: E402  (used for in-sim marker prim creation)
 # Isaac Sim 4.x: `omni.isaac.core.world.World`. Isaac Sim 5.x renamed to
 # `isaacsim.core.api.World`. Try the modern path first; fall back so this
 # orchestrator works on both 4.x (where the user's prior teleop_final_world.py
@@ -557,8 +558,6 @@ def main() -> int:
     # Pegasus uses ENU (x=east, y=north, z=up) for spawn coords.
     # mission_demo's "corner" terminology is in N/E (y=north,
     # x=east), so SW = (-east, -north) etc. — convert here.
-    from pxr import UsdGeom, Gf
-    import omni.usd
     stage = omni.usd.get_context().get_stage()
     sx, sy, sz = float(args.spawn[0]), float(args.spawn[1]), float(args.spawn[2])
     half = float(args.map_half_size)

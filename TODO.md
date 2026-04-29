@@ -96,23 +96,14 @@ the context behind each.
     10.3 m from SE corner (vs mission14's 34 m). Diagnostic CSV
     shipped behind `--waypoint-trace-csv` flag for future tuning.
 
-11. **X_LEG_3 (the long SE→NW diagonal) still times out 41.8 m
-    short** — much worse than X_LEG_1/2 in mission15.
-    - Apr 29 tested 3 fixes; all reverted. See MEMORY.md v0.11
-      for the table. Real coupling: drone pitches forward → cos(tilt)
-      lift loss → altitude drops to 2-3 m → drone hits chemical-
-      plant obstacles. Higher cruise alt and smaller map both
-      moved the obstacle problem rather than fixed it.
-    - **Real next experiment**: keep pitch authority high but add
-      a throttle-Kd term keyed off `vario` (vertical velocity)
-      so altitude doesn't sag during pitched flight. Also
-      possibly an "altitude-priority" boost: when rel_alt drops
-      below `cruise_alt - 5`, override the pitch_us back to
-      neutral until altitude recovers.
-    - The new in-sim target bubble (v0.12) makes this much
-      easier to debug — operator can watch whether the drone is
-      tracking the target or being pulled away by altitude
-      loss.
+11. ~~X_LEG_3 long diagonal stalls~~ **MITIGATED v0.13 (Apr 29
+    afternoon).** Tilt-throttle feedforward (`tilt_throttle_factor =
+    0.15`): commanded forward pitch boosts throttle proportionally,
+    countering cos(tilt) lift loss. mission21 dropped X_LEG_3 from
+    41.8 m short → 14.1 m short. Trade-off: X_LEG_2 regressed to
+    18 m short (was 10.3 m). Net better on the long-diagonal
+    bottleneck. Vario-Kd term still queued as a future improvement
+    if we want tighter altitude hold during pitched flight.
 
 12. **In-sim visualization breadcrumbs (v0.12 follow-up).** User
     asked for "every 25 m" markers to show where the controller

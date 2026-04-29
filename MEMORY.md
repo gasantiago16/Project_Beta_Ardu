@@ -49,6 +49,45 @@ project state.
   - Skipped: lift-out-of-snap-gate optimization (premature) and
     BF-restart-reconnect logic (not blocking)
 
+### v0.13 — tilt-throttle feedforward (Apr 29 afternoon)
+
+Picked up TODO #11 with the right hypothesis this time: mission16's
+trace showed altitude sagging to 2-3 m during pitched flight because
+`cos(tilt)` reduces vertical thrust faster than the pure-P altitude
+controller can react. Added a feedforward term that boosts throttle
+proportionally to commanded forward pitch — anticipates the lift loss
+instead of waiting for the alt-error feedback to catch up. New
+`MissionConfig.tilt_throttle_factor: 0.15`. Throttle authority is
+the existing P term + feedforward, then clamped to ±200 µs.
+
+**mission20 (factor=0.25) vs mission21 (factor=0.15) vs mission16:**
+
+| | mission16 (no FF) | mission20 (0.25) | mission21 (0.15) |
+|---|---|---|---|
+| X_LEG_1 short | 11.3 m | 13.3 m | 15.0 m |
+| X_LEG_2 short | 12.6 m | **8.5 m** | 18.0 m |
+| X_LEG_3 short | 33.7 m | 31.3 m | **14.1 m** |
+| recoveries / 240 s | 2 | 19 | 10 |
+| max altitude peak | 27 m | 43 m | 33 m |
+
+**Why 0.15 wins on net.** mission20 with 0.25 saw the drone climb
+to 43 m and crash to 0 m three times — feedforward + alt-P
+both pushing throttle up when below target = throttle saturated, big
+overshoot. 0.15 reduces the boost so the alt-P term stays in charge
+overall. The closest result on any single leg (X_LEG_2 at 8.5 m, just
+3.5 m from arrival) came at 0.25 but cost altitude stability and
+3× the recoveries; 0.15 trades that single best for **far better
+X_LEG_3 (the long diagonal) and noticeably calmer altitude**.
+
+**Trace tooling paid off again.** The mission16 decile data ruled out
+yaw-gate and pitch-saturation, pointed at altitude sag during tilt as
+the real problem. Without the per-tick CSV from v0.10's
+`--waypoint-trace-csv`, we'd have iterated more variables blindly.
+
+3 new tests in `TestTiltThrottleFeedforward`: hover-no-pitch baseline,
+forward-pitch-adds-proportional-boost, factor=0 disables. All 25
+targeted tests pass.
+
 ### v0.12 — in-sim visual UX (Apr 29 mid-morning)
 
 User asked for two operator-visibility improvements while watching
