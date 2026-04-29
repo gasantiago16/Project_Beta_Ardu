@@ -349,6 +349,25 @@ class Mission:
         # ~13 m per recovery, so legs still don't reach corners.
         self._recovery_hold_until = 0.0
         self.RECOVERY_HOLD_S = 1.5
+        # Crash-floor safety net (Apr 29 v0.17, addresses fpvfix-run
+        # ground impact). Apr 29 fpvfix flight: drone climbed past
+        # cruise alt to 49m rel_alt, overshot, dove uncontrolled to
+        # rel_alt=-7m → ground impact → flip. Underdamped altitude
+        # PID — needs a Kd term (TODO #11), but until that lands we
+        # need a safety net so a single oscillation half-cycle can't
+        # bury the drone in the chemical-plant floor. Logic: while
+        # the drone is below FLOOR_ALT_M AND descending faster than
+        # FLOOR_VARIO_M_S, force throttle to hover+FLOOR_OFFSET (very
+        # high). Doesn't fight the recovery state machine (those
+        # paths return early) or pre-flight phases. Doesn't help if
+        # drone is already inverted — FLIP detection still owns that.
+        self._last_rel_alt: float | None = None
+        self._last_rel_alt_t = 0.0
+        self._vario_m_s = 0.0
+        self.FLOOR_ALT_M = 3.0
+        self.FLOOR_VARIO_M_S = -0.5
+        self.FLOOR_THROTTLE_OFFSET = 200
+        self._floor_logged_at = 0.0
         # Within the HOLD stage, the FIRST `RECOVERY_HOLD_IDLE_S` lets
         # the AUX1 LOW→HIGH transition (at LOW→HOLD boundary) land with
         # throttle idle so the THROTTLE bit (set when throttle >
@@ -507,6 +526,27 @@ class Mission:
         rc[SLOT_AUX2] = PWM_MIN
         rc[SLOT_AUX3] = PWM_MIN
         rc[SLOT_AUX4] = PWM_MIN
+
+        # Vario tracking for crash-floor safety. Finite-diff rel_alt
+        # gated at dt > 0.1s (avoids small-dt noise blowups), then
+        # low-pass with tau=0.5s so one bad sample can't trigger the
+        # clamp. Run before all early returns so vario is current
+        # even after recovery cycles.
+        rel_now = self._rel_alt(snap)
+        if rel_now is not None:
+            if self._last_rel_alt is None:
+                self._last_rel_alt = rel_now
+                self._last_rel_alt_t = now
+            else:
+                dt = now - self._last_rel_alt_t
+                if dt > 0.1:
+                    raw_vario = (rel_now - self._last_rel_alt) / dt
+                    alpha = min(1.0, dt / 0.5)
+                    self._vario_m_s = (
+                        (1.0 - alpha) * self._vario_m_s + alpha * raw_vario
+                    )
+                    self._last_rel_alt = rel_now
+                    self._last_rel_alt_t = now
         # Default: idle throttle. Only flying phases push it up. Pre-flight
         # ticks (no GPS yet, ARM phase) MUST send idle so BF's THROTTLE
         # arming-disable bit clears — otherwise high throttle + AUX1 high
@@ -609,6 +649,30 @@ class Mission:
             self._compute_waypoint_rc(rc, snap, self._circle_target(now))
         elif self.phase == Phase.LANDING_DESCENT:
             self._compute_descent_rc(rc, snap)
+
+        # Crash-floor: if drone is dangerously low AND descending,
+        # override throttle to hover+FLOOR_OFFSET. Catches altitude-
+        # oscillation half-cycles before ground impact regardless of
+        # upstream PID misbehavior. Skipped on LANDING_DESCENT (which
+        # is *supposed* to descend toward the ground) and pre-flight
+        # phases (drone is supposed to be on the ground).
+        if (self.phase not in (Phase.INIT, Phase.ARM, Phase.DONE,
+                               Phase.LANDING_DESCENT, Phase.HANDOVER,
+                               Phase.LOS_TEST)
+                and self._last_rel_alt is not None
+                and self._last_rel_alt < self.FLOOR_ALT_M
+                and self._vario_m_s < self.FLOOR_VARIO_M_S):
+            forced = self.cfg.throttle_hover_us + self.FLOOR_THROTTLE_OFFSET
+            if forced > rc[SLOT_THROTTLE]:
+                rc[SLOT_THROTTLE] = forced
+                if now - self._floor_logged_at >= 0.5:
+                    self._floor_logged_at = now
+                    log.warning(
+                        "[floor] rel_alt=%.2fm vario=%+.2fm/s "
+                        "phase=%s — forcing thr=%d",
+                        self._last_rel_alt, self._vario_m_s,
+                        self.phase.value, forced,
+                    )
         return rc
 
     # ── Phase transitions ───────────────────────────────────────────────
