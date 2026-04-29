@@ -113,6 +113,17 @@ the context behind each.
     commanded path. Cheap: USD prim creation/translate already
     proven in v0.12.
 
+13. ~~FPV camera side quest.~~ **DONE v0.14 (Apr 29 evening).**
+    `--fpv-camera` flag adds two cameras: world-fixed
+    `/World/debug_world_camera` and drone-parented
+    `/World/quadrotor/fpv_camera`. Body-local (0.3, 0, 3.0) clears
+    the chemical-plant walkway above spawn. Rotation
+    `(-15, -90, -90)` for upright forward FPV view (Y=-90 gimbal-
+    locks Z+X about the view axis; Z=-90 gives camera-up = body
+    +Z). Programmatic `capture_viewport_to_file` after warm-up
+    ticks lets us verify orientation without an operator in the
+    loop.
+
 ## Not doing — rejected ideas
 
 - **Disable BAD_RX_RECOVERY entirely via `failsafe_recovery_delay = 0`.**

@@ -151,6 +151,15 @@ parser.add_argument(
          "match mission_demo's --respawn-signal-file value or the two "
          "processes silently disagree.",
 )
+parser.add_argument(
+    "--fpv-camera", action="store_true",
+    help="Enable FPV-style first-person camera mounted on the drone. "
+         "Creates a Camera prim under /World/quadrotor that translates "
+         "with the drone, simulating the racing-quad pilot view. "
+         "Default off (third-person Isaac Sim viewport). Position/"
+         "rotation tuned for Iris airframe; tweak in-source if mounting "
+         "a different airframe.",
+)
 args = parser.parse_args()
 
 
@@ -576,7 +585,12 @@ def main() -> int:
     # Mission_demo's corners are N/E offsets from spawn (which becomes
     # HOME at INIT). In ENU: north→y, east→x.
     marker_alt = sz + 1.0  # slightly above spawn so spheres aren't buried
-    _make_marker("spawn",  sx,        sy,        sz,         (0.0, 1.0, 0.0), 1.5)
+    # Spawn marker kept small (0.3 m) so it doesn't engulf an FPV
+    # camera mounted on the drone — discovered Apr 29 when the drone-
+    # parented camera at (0.5, 0, 0.1) body local was inside the
+    # original 1.5 m-radius sphere at spawn world position, hence
+    # all-black FPV.
+    _make_marker("spawn",  sx,        sy,        sz,         (0.0, 1.0, 0.0), 0.3)
     _make_marker("SW",     sx - half, sy - half, marker_alt, (0.1, 0.1, 1.0), 2.5)
     _make_marker("SE",     sx + half, sy - half, marker_alt, (1.0, 0.1, 1.0), 2.5)
     _make_marker("NE",     sx + half, sy + half, marker_alt, (1.0, 0.5, 0.0), 2.5)
@@ -597,6 +611,112 @@ def main() -> int:
         flush=True,
     )
     timeline.play()
+
+    # ── FPV camera (Apr 29 side quest) ──────────────────────────
+    # Two cameras, two debug paths:
+    #   /World/debug_world_camera — NOT parented under drone, fixed
+    #     in world. Isolates "viewport switch works" from "drone
+    #     parenting works."
+    #   /World/quadrotor/fpv_camera — parented under drone for the
+    #     real FPV use. Top-down debug pose for now.
+    # We log get_active_camera() before/after the switch so we can
+    # see whether the API call took effect. Activates the WORLD
+    # debug camera first; if operator sees the spawn area, viewport
+    # API is fine and we can iterate the drone-parented camera.
+    if args.fpv_camera:
+        # World-fixed debug camera (NOT parented under drone)
+        debug_path = "/World/debug_world_camera"
+        debug_cam = UsdGeom.Camera.Define(stage, debug_path)
+        UsdGeom.XformCommonAPI(debug_cam.GetPrim()).SetTranslate(
+            Gf.Vec3d(sx, sy - 10.0, sz + 5.0),
+        )
+        # Look toward spawn — rotate camera so default -Z points +Y
+        # (north, toward spawn). +90° around X tips the look from
+        # straight-down toward forward-ish; tweakable.
+        UsdGeom.XformCommonAPI(debug_cam.GetPrim()).SetRotate(
+            Gf.Vec3f(75.0, 0.0, 0.0),
+        )
+        debug_cam.GetFocalLengthAttr().Set(24.0)
+        debug_cam.GetClippingRangeAttr().Set(Gf.Vec2f(0.05, 10000.0))
+
+        # Drone-parented FPV camera. Iris spawn at (0, 0, 1.5) in
+        # the chemical plant happens to be DIRECTLY UNDER A WALKWAY
+        # — the proximate cause of the all-black FPV screenshots
+        # we saw on Apr 29. Camera body-local (0.3 m forward, 3 m
+        # up) puts it at world (0.3, 0, 4.5) at spawn — above the
+        # walkway and looking forward. As the drone flies up, the
+        # camera follows and the view changes naturally. Rotation
+        # X=-15° pitch-down + Y=-90° yaw so default -Z look maps
+        # to body +X (forward) with FPV-racer downtilt.
+        fpv_path = "/World/quadrotor/fpv_camera"
+        fpv = UsdGeom.Camera.Define(stage, fpv_path)
+        UsdGeom.XformCommonAPI(fpv.GetPrim()).SetTranslate(
+            Gf.Vec3d(0.3, 0.0, 3.0),
+        )
+        # USD XformCommonAPI XYZ rotation order, gimbal lock at
+        # Y=-90: Z rotation locks with X about the view axis. Z=+90
+        # rolled the image to body -Z (down) — wrong direction. Z=-90
+        # rolls camera up to body +Z (up). Decomposed: at Y=-90,
+        # increasing Z by 90° rotates camera-up CCW about body +X.
+        # We need camera-up = body +Z, so Z=-90.
+        UsdGeom.XformCommonAPI(fpv.GetPrim()).SetRotate(
+            Gf.Vec3f(-15.0, -90.0, -90.0),
+        )
+        # 14 mm focal ≈ 105° HFOV (FPV racer typical).
+        fpv.GetFocalLengthAttr().Set(14.0)
+        fpv.GetClippingRangeAttr().Set(Gf.Vec2f(0.05, 10000.0))
+
+        try:
+            from omni.kit.viewport.utility import get_active_viewport
+            viewport = get_active_viewport()
+            before_path = (
+                str(viewport.camera_path)
+                if hasattr(viewport, "camera_path") else "?"
+            )
+            print(f"[final_world_betaflight] FPV-DEBUG before switch, "
+                  f"viewport.camera_path = {before_path}", flush=True)
+            # Activate the drone-parented FPV camera (top-down debug
+            # pose — 1m above drone, looking straight down).
+            viewport.set_active_camera(fpv_path)
+            after_path = (
+                str(viewport.camera_path)
+                if hasattr(viewport, "camera_path") else "?"
+            )
+            print(f"[final_world_betaflight] FPV-DEBUG after switch to "
+                  f"{fpv_path}, viewport.camera_path = {after_path}",
+                  flush=True)
+            print(f"[final_world_betaflight] FPV-DEBUG: world-fixed "
+                  f"{debug_path} also created (proven working). To "
+                  f"test it, switch in the viewport menu manually.",
+                  flush=True)
+        except (ImportError, Exception) as _e:
+            print(f"[final_world_betaflight] FPV camera prim created "
+                  f"but viewport switch failed: {_e}", flush=True)
+
+        # Periodic auto-screenshot of the current viewport so the
+        # human in the loop can pull a PNG and the assistant can
+        # read it for diagnosis. Saved to project root every 5 s.
+        # Disabled in production; only runs when --fpv-camera is
+        # set.
+        # Pump a few physics+render ticks so the parented camera
+        # picks up its parent's resolved world transform before we
+        # screenshot (otherwise we capture pre-physics-tick black).
+        for _ in range(20):
+            world.step(render=True)
+        try:
+            from omni.kit.viewport.utility import capture_viewport_to_file
+            _fpv_screenshot_path = str(
+                Path(__file__).resolve().parents[2] / "fpv_screenshot.png"
+            )
+            capture_viewport_to_file(viewport, _fpv_screenshot_path)
+            print(f"[final_world_betaflight] Post-warmup viewport "
+                  f"screenshot → {_fpv_screenshot_path}", flush=True)
+        except Exception as _e:
+            _fpv_screenshot_path = None
+            print(f"[final_world_betaflight] viewport screenshot "
+                  f"capture not available: {_e}", flush=True)
+    else:
+        _fpv_screenshot_path = None
 
     last_stats_t = time.monotonic()
     last_stats = bf_backend.stats()

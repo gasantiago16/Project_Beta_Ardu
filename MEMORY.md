@@ -49,6 +49,43 @@ project state.
   - Skipped: lift-out-of-snap-gate optimization (premature) and
     BF-restart-reconnect logic (not blocking)
 
+### v0.14 — FPV camera side quest (Apr 29 evening)
+
+User asked: "could we put the camera in fpv mode so we can see what
+the drone sees as it flies around?" Added `--fpv-camera` flag to the
+orchestrator. Two cameras created when set:
+
+1. `/World/debug_world_camera` — world-fixed at (sx, sy-10, sz+5)
+   looking at spawn. Isolates "viewport switch works" from
+   "drone parenting works." Operator-switchable from the viewport
+   menu if the drone-parented camera misbehaves.
+2. `/World/quadrotor/fpv_camera` — parented under the Iris, body
+   local (0.3, 0, 3.0) — 3 m above the drone so the view clears
+   the chemical-plant walkway directly above the spawn point.
+
+**Three things broke and how they got fixed:**
+
+- **All-black image** at body-height camera positions. Not occlusion
+  by the drone mesh — the Iris in this scene spawns DIRECTLY UNDER
+  A WALKWAY in the chemical plant. Any camera within ~2 m of body
+  height was inside the walkway structure. Confirmed by lifting
+  the camera to (0, 0, 50): clear top-down view. Settled on Z=3.0.
+- **Rotation order gimbal lock.** With Y=-90 (yaw camera to look
+  body +X), Z and X rotations co-axial about the view axis. Z=+90
+  was the wrong sign of roll; Z=-90 gives camera-up = body +Z.
+  Final rotation: `(-15, -90, -90)` for 15° pitch-down FPV.
+- **Spawn marker engulfing camera.** v0.12's spawn-marker sphere
+  was 1.5 m radius, centered exactly on the camera at low offsets.
+  Shrunk to 0.3 m so it doesn't render over the FPV view.
+
+**Programmatic screenshot capture.** Added a one-shot
+`capture_viewport_to_file` after 20 warm-up `world.step(render=True)`
+ticks (so the parented camera resolves its world transform before
+capture). Saves to `fpv_screenshot.png` at project root. Lets the
+assistant `Read` the rendered PNG to verify orientation without the
+human in the loop — was the unblocking move for the rotation
+debugging.
+
 ### v0.13 — tilt-throttle feedforward (Apr 29 afternoon)
 
 Picked up TODO #11 with the right hypothesis this time: mission16's
