@@ -23,11 +23,12 @@ project state.
 
 ---
 
-## Snapshot — v0.17 (Apr 29 noon 2026, crash-floor safety net UNTESTED)
+## Snapshot — v0.18 (Apr 29 afternoon 2026, tilt-FF gate UNTESTED)
 
 | Component | State |
 |---|---|
-| Crash-floor clamp (v0.17) | ⚠️ shipped UNTESTED. `mission_demo` Mission tracks vario via LP-filtered finite-diff (tau=0.5 s); when in a flying phase AND `rel_alt < 3 m` AND `vario < -0.5 m/s`, force throttle to `hover + 200 µs`. Verify run blocked this session by Vulkan `OUT_OF_DEVICE_MEMORY` after 3 Isaac Sim launches. Verify on a fresh boot. |
+| Tilt-FF gate (v0.18) | ⚠️ shipped UNTESTED. `mission_demo._compute_waypoint_rc` now sets `tilt_boost = 0` when `err_m ≤ 0` (drone at or above target). Apr 29 fpvfix run gave the smoking gun: at 10:48:28 yaw aligned, FF kicked in, throttle jumped +24 µs INSTANTLY while drone was already 6 m above target. Drone then climbed 28 m more over 67 s. The gate kills that positive-feedback path. Verify on next session's first run AS A STACK with v0.17 floor clamp. |
+| Crash-floor clamp (v0.17) | ⚠️ shipped UNTESTED. `mission_demo` Mission tracks vario via LP-filtered finite-diff (tau=0.5 s); when in a flying phase AND `rel_alt < 3 m` AND `vario < -0.5 m/s`, force throttle to `hover + 200 µs`. If the v0.18 gate works, this clamp should be DORMANT — drone never reaches 3 m AGL. |
 | `[phys-truth]` orch log (v0.16) | ✅ shipped. `final_world_betaflight.py` logs `bf_backend._latest_state.position` every 5 s. Canonical altitude oracle. **DO NOT REMOVE** — closes TODO #0 (shim path was always faithful; the v0.15 "rel_alt = half of physics" claim was a stage-browser misread of `/World/quadrotor`, the v0.14 stale-prim bug). |
 | FPV camera rotation (v0.16) | ✅ fixed. Body-local Euler XYZ now `(75, 0, -90)` (was `-15, -90, -90`). Old angles silently mapped camera "up" into the horizontal plane (90° tilt) AND sat exactly on the Y=-90 gimbal lock. New angles: look=+X, up=+Z, 15° downtilt, no gimbal lock at any yaw. |
 | FPV camera tracker (v0.15) | ✅ shipped. Top-level `/World/fpv_camera`, world transform set every tick from `bf_backend._latest_state`. Tracks position AND yaw. |

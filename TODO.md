@@ -176,19 +176,24 @@ for the context behind each.
     corners, that's also valid — clamp is dormant safety net.
 
 17. **Altitude PID is underdamped — add Kd term keyed to vario.**
-    Apr 29 fpvfix run: drone overshot 30 m cruise target to 49 m
-    (87% overshoot), then dove uncontrolled to `rel_alt = -7 m`
-    (5 m below world ground), tumbling on yaw, flipped on impact.
-    `_compute_waypoint_rc` uses `kp=3.0` on `rel_alt error` plus
-    a `tilt_throttle_factor=0.15` feedforward — no derivative
-    term. Classic underdamped P-only behavior. Floor clamp (#16)
-    is the bandaid; this is the real fix. Add a Kd term that
-    opposes vario: `t_kd = -kd * vario`, tune kd so a +1 m/s climb
-    rate at zero error yields ~-30-50 µs throttle. Also gate the
-    `tilt_throttle_factor` feedforward to only fire when `err_m
-    > 0` (drone below target) — when drone is already above
-    target, the FF is what's keeping it climbing. Fast win without
-    full Kd: `if err_m > 0: tilt_boost = ...; else: tilt_boost = 0`.
+    Apr 29 fpvfix run: drone overshot 15 m cruise target to 49 m
+    (230% overshoot — original "87%" misread the cruise as 30 m;
+    actual default cruise is 15 m), then dove uncontrolled to
+    `rel_alt = -7 m`, tumbling on yaw, flipped on impact.
+    Underlying control is kp-only on rel_alt error plus a tilt-FF
+    feedforward — no derivative term, classic underdamped behavior.
+    - **Tilt-FF gate** (the cheap part): SHIPPED v0.18 (UNTESTED).
+      Gate FF to fire only when `err_m > 0`. Per fpvfix log analysis,
+      this kills the dominant positive-feedback path: drone went 14m
+      → 49m past target because FF kept adding throttle as drone
+      climbed past target. With the gate, FF stops at `err_m=0` so
+      kp regains descent authority. Verify on next session's run.
+    - **Kd term** (the real fix, queued): `t_kd = -kd_per_m_s *
+      vario`. Vario is already tracked on `Mission` (added v0.17 for
+      the floor clamp). Start at `kd_per_m_s = 30 µs` per m/s so a
+      +1 m/s climb rate at zero error yields −30 µs throttle. Only
+      worth doing AFTER gate is verified — the gate may be enough
+      alone, in which case Kd adds complexity for no gain.
 
 18. **Sim hygiene — pre-warm orch FDM stream so BF clears
     BOOT_GRACE_TIME.** After a `docker compose restart` BF SITL

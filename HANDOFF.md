@@ -20,7 +20,8 @@
 | `mission_demo` X-pattern flight | ✅ flies, but flips during legs | Today's runs: mission flew CLIMB → X_LEG_1 → X_LEG_2 → X_LEG_3 → TO_CENTER, FLIP'd on ground impact during X_LEG_3 / CIRCLE_1 |
 | FPV camera + MP4 recording | ✅ shipped + verified | `Desktop/fpv_mission_20260429_104652.mp4` shows horizon level, sky on top, walkway below; zero gimbal lock warnings |
 | `[phys-truth]` altitude oracle | ✅ shipped | Closed TODO #0; shim altitude path proven faithful end-to-end (±0.4 m at peak across all three sources) |
-| Crash-floor clamp (v0.17) | ⚠️ shipped UNTESTED | Verify run blocked by Vulkan OOM. Patch on `pegasus-bridge` as `3255ae1`. See TODO #16. |
+| Tilt-FF gate (v0.18) | ⚠️ shipped UNTESTED | One-line gate: tilt-FF fires only when `err_m > 0`. Apr 29 fpvfix showed FF + forward stick formed a positive-feedback loop that drove drone 14 m → 49 m past target. See TODO #17 (now partially shipped). |
+| Crash-floor clamp (v0.17) | ⚠️ shipped UNTESTED | Verify run blocked by Vulkan OOM. Patch on `pegasus-bridge` as `3255ae1`. See TODO #16. Should be DORMANT once v0.18 gate works (drone shouldn't reach 3 m AGL). |
 | **Altitude PID oscillation** | ⚠️ open | Today's fpvfix run: drone overshot 30 m target to 49 m, dove to rel_alt = -7 m, flipped on ground impact. Real fix is Kd term (TODO #17). |
 | **Sim hygiene — BOOT_GRACE_TIME quirk** | ⚠️ open | After `docker compose restart`, BF holds `0x200` until orch FDM ≥ 50 Hz. Pre-warm orch FDM before mission_demo connects. TODO #18. |
 | Companion bug audit (Apr 27) | ⚠️ unchanged | `CH_THROTTLE/CH_YAW` issue from old table is still open; not touched this session. |

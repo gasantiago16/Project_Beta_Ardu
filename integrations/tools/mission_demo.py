@@ -921,7 +921,21 @@ class Mission:
         if rel is not None:
             err_m = target.alt_m - rel
             t_offset = int(self.cfg.throttle_kp_per_m * err_m)
-            tilt_boost = int(forward * self.cfg.tilt_throttle_factor)
+            # Tilt-FF gate (v0.18, addresses Apr 29 fpvfix oscillation).
+            # The FF is sized to compensate for cos(tilt) lift loss when
+            # the drone is climbing/holding altitude under forward pitch.
+            # When the drone is ALREADY above target (err_m < 0), the FF
+            # adds throttle that cancels the kp term's descent command —
+            # forming a positive-feedback path that drove the fpvfix run
+            # 14 m → 49 m past target. Concretely: at 10:48:28 yaw
+            # aligned, FF kicked in, throttle jumped +24 µs INSTANTLY
+            # while drone was already at err=−6 m. With this gate, FF is
+            # zero whenever err_m ≤ 0 so kp regains authority above
+            # target. Below target the FF behaves as before.
+            if err_m > 0:
+                tilt_boost = int(forward * self.cfg.tilt_throttle_factor)
+            else:
+                tilt_boost = 0
             t_total = max(-self.cfg.throttle_max_offset,
                           min(self.cfg.throttle_max_offset,
                               t_offset + tilt_boost))

@@ -4,6 +4,17 @@ What's shipped today, what's deferred, and the trigger that would make us
 revisit each deferred item. Read [`README.md`](README.md) first for the
 architectural picture.
 
+## Shipped — v0.18 (Apr 29 afternoon 2026, UNTESTED)
+
+- ⚠️ **Tilt-throttle FF gate in `_compute_waypoint_rc`.** FF now
+  fires only when `err_m > 0` (drone below target). Above target,
+  `tilt_boost = 0` so the kp term has full authority to command
+  descent. Apr 29 fpvfix log analysis showed that without the gate,
+  the FF + forward-stick formed a positive-feedback path that drove
+  the drone 14 m → 49 m past a 15 m cruise target. **UNTESTED** —
+  GPU-OOM blocks verify in this session. Verify as a stack with the
+  v0.17 floor clamp on next session's first run.
+
 ## Shipped — v0.17 (Apr 29 noon 2026, UNTESTED)
 
 - ⚠️ **Crash-floor safety net in `mission_demo`.** Vario tracking
