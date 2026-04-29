@@ -5,17 +5,21 @@ for the context behind each.
 
 ## High — sim flight quality
 
-0. **Shim altitude vs physics altitude divergence (NEW v0.15).** During
-   the FPV verification run, mission_demo's `rel_alt` reading was ~half
-   of `bf_backend._latest_state.position[2]` (rel_alt=36 m when physics
-   z=78 m). Controller responds to the shim reading, so it commanded
-   throttle below hover (1602 µs) while the drone was actually still
-   climbing — closed the loop on the wrong altitude. Likely root: the
-   shim's MSP_ALTITUDE synthesis from `bf_sim_state.txt` is reading the
-   wrong column or wrong unit. Next session: instrument shim altitude
-   computation alongside the physics state, confirm divergence, fix at
-   source. Blocks all flight-quality work that depends on accurate
-   altitude (which is most of it).
+0. ~~Shim altitude vs physics altitude divergence.~~ **CLOSED Apr 29
+   morning (v0.16 verify run).** Re-ran full X-pattern with new
+   `[phys-truth]` instrumentation (`final_world_betaflight.py` logs
+   `bf_backend._latest_state.position` every 5 s). Peak values from
+   the same flight: phys-truth z=**+32.40 m**, shim alt=**132.4 m**
+   (rel = 32.65 m after subtracting origin 99.75), mission_demo
+   `rel_alt`=**32.76 m**. Three sources within ±0.4 m end-to-end. The
+   Apr 28 regression note's "rel_alt=36 m / physics z=78 m" almost
+   certainly came from reading `/World/quadrotor` translate in the
+   Isaac Sim stage browser — the v0.14 bug (that prim doesn't track
+   physics; physics moves a deeper rigid-body prim). Logs preserved
+   as `verify_orch.log` (768 lines, 65 phys-truth samples),
+   `verify_shim.log`, `verify_mission.log`. Instrumentation is
+   load-bearing going forward — DO NOT remove the `[phys-truth]`
+   log line; it's our canonical altitude oracle now.
 
 
 1. ~~Chronic RX_FAILSAFE bit-2 latch.~~ **CLOSED Apr 28 PM** by the

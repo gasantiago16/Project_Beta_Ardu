@@ -671,9 +671,7 @@ def main() -> int:
         # we saw on Apr 29. Camera body-local (0.3 m forward, 3 m
         # up) puts it at world (0.3, 0, 4.5) at spawn — above the
         # walkway and looking forward. As the drone flies up, the
-        # camera follows and the view changes naturally. Rotation
-        # X=-15° pitch-down + Y=-90° yaw so default -Z look maps
-        # to body +X (forward) with FPV-racer downtilt.
+        # camera follows and the view changes naturally.
         # FPV camera at TOP LEVEL (NOT under /World/quadrotor).
         # Pegasus's `/World/quadrotor` prim's transform stays at
         # identity even when the drone flies — physics moves a
@@ -683,6 +681,12 @@ def main() -> int:
         # main loop now reads `bf_backend._latest_state` and
         # explicitly translates+rotates this camera every tick to
         # `drone_pos + R(drone_attitude) * body_offset`.
+        # Rotation Euler XYZ (75, 0, -90) maps default USD camera
+        # (look -Z, up +Y) to body (look +X = drone forward, up +Z
+        # = world up, 15° pitch-down). The earlier (-15, -90, -90)
+        # in v0.15 had Y=-90 which silently introduced gimbal lock
+        # AND mapped "up" into the horizontal plane — the entire
+        # FPV image was rotated 90° from natural. Fixed v0.16.
         fpv_path = "/World/fpv_camera"
         fpv = UsdGeom.Camera.Define(stage, fpv_path)
         # Initial pose at spawn so the post-warmup screenshot has a
@@ -692,17 +696,15 @@ def main() -> int:
             Gf.Vec3d(sx + 0.3, sy, sz + 3.0),
         )
         UsdGeom.XformCommonAPI(fpv.GetPrim()).SetRotate(
-            Gf.Vec3f(-15.0, -90.0, -90.0),
+            Gf.Vec3f(75.0, 0.0, -90.0),
         )
         # 14 mm focal ≈ 105° HFOV (FPV racer typical).
         fpv.GetFocalLengthAttr().Set(14.0)
         fpv.GetClippingRangeAttr().Set(Gf.Vec2f(0.05, 10000.0))
         # Stash the body-local FPV camera rotation as a Rotation so
         # the main-loop tracker can compose drone_attitude * fpv.
-        # XYZ Euler (-15, -90, -90) maps default USD camera (look
-        # -Z, up +Y) to body (look +X, up +Z, 15° pitch-down).
         fpv_body_local_rot = _R_for_fpv.from_euler(
-            "xyz", [-15.0, -90.0, -90.0], degrees=True,
+            "xyz", [75.0, 0.0, -90.0], degrees=True,
         )
         fpv_body_offset = (0.3, 0.0, 3.0)
 
@@ -804,6 +806,7 @@ def main() -> int:
     print(f"[final_world_betaflight] Publishing sim state to: {state_file_path}",
           flush=True)
     last_state_write = 0.0
+    last_phys_log = 0.0
     # Respawn signal file. mission_demo writes this when it aborts
     # due to flip detection so the operator can iterate without
     # restarting Pegasus. We poll for it ~10 Hz; on detection,
@@ -946,6 +949,19 @@ def main() -> int:
                                 f"{st.position[0]:.3f} "
                                 f"{st.position[2]:.3f} "
                                 f"{yaw_deg:.2f}\n"
+                            )
+                        # First-party physics ground truth for the shim/
+                        # mission_demo altitude path. TODO #0 needs this
+                        # logged (not stage-browser-read) so we can
+                        # confirm rel_alt = z - z_init across a flight.
+                        if now_state - last_phys_log >= 5.0:
+                            last_phys_log = now_state
+                            print(
+                                f"[phys-truth] z={st.position[2]:+7.2f}m "
+                                f"n={st.position[1]:+7.2f} "
+                                f"e={st.position[0]:+7.2f} "
+                                f"yaw={yaw_deg:+6.1f}deg",
+                                flush=True,
                             )
                     except (OSError, AttributeError):
                         pass
