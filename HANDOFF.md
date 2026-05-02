@@ -1,34 +1,42 @@
-# HANDOFF — Project_Beta_Ardu HITL flight (Apr 29 update)
+# HANDOFF — Project_Beta_Ardu HITL flight (May 1 update)
 
 **Audience:** Jeremy (or anyone picking this up cold).
 **Read time:** 5 minutes. Then 10 minutes to reproduce the working stack.
 
 > **Read order for incoming:** this status table → `MEMORY.md` Snapshot
-> v0.17 → `TODO.md` items #16/#17 → `ROADMAP.md` for the version timeline.
-> The Apr 27 status table further below is HISTORICAL — kept for the
-> diagnostic walkthrough on what was broken when, but superseded by
-> the Apr 29 table.
+> v0.20 → `TODO.md` items #19 (verify v0.20) and #17 (Kd term, queued)
+> → `ROADMAP.md` for the version timeline. The Apr 27 status table
+> further below is HISTORICAL — kept for the diagnostic walkthrough
+> on what was broken when.
 
 ---
 
-## Status table (Apr 29 12:30 — current)
+## Status table (May 1 evening — current)
 
 | Layer | State | Evidence |
 |---|---|---|
-| BF SITL Docker container | ✅ boots clean | `docker logs project-beta-ardu-sitl` → `[sitl] Ready. SITL pid=12` |
-| Bridge wire | ✅ ~80 Hz steady, 0 timeouts | `[bridge] tx=… rx=… (80 Hz) motor w=…` once BF is armed and FDM rate is stable |
-| `mission_demo` X-pattern flight | ✅ flies, but flips during legs | Today's runs: mission flew CLIMB → X_LEG_1 → X_LEG_2 → X_LEG_3 → TO_CENTER, FLIP'd on ground impact during X_LEG_3 / CIRCLE_1 |
-| FPV camera + MP4 recording | ✅ shipped + verified | `Desktop/fpv_mission_20260429_104652.mp4` shows horizon level, sky on top, walkway below; zero gimbal lock warnings |
-| `[phys-truth]` altitude oracle | ✅ shipped | Closed TODO #0; shim altitude path proven faithful end-to-end (±0.4 m at peak across all three sources) |
-| Tilt-FF gate (v0.18) | ⚠️ shipped UNTESTED | One-line gate: tilt-FF fires only when `err_m > 0`. Apr 29 fpvfix showed FF + forward stick formed a positive-feedback loop that drove drone 14 m → 49 m past target. See TODO #17 (now partially shipped). |
-| Crash-floor clamp (v0.17) | ⚠️ shipped UNTESTED | Verify run blocked by Vulkan OOM. Patch on `pegasus-bridge` as `3255ae1`. See TODO #16. Should be DORMANT once v0.18 gate works (drone shouldn't reach 3 m AGL). |
-| **Altitude PID oscillation** | ⚠️ open | Today's fpvfix run: drone overshot 30 m target to 49 m, dove to rel_alt = -7 m, flipped on ground impact. Real fix is Kd term (TODO #17). |
-| **Sim hygiene — BOOT_GRACE_TIME quirk** | ⚠️ open | After `docker compose restart`, BF holds `0x200` until orch FDM ≥ 50 Hz. Pre-warm orch FDM before mission_demo connects. TODO #18. |
-| Companion bug audit (Apr 27) | ⚠️ unchanged | `CH_THROTTLE/CH_YAW` issue from old table is still open; not touched this session. |
+| BF SITL Docker container | ✅ boots clean | `docker logs project-beta-ardu-sitl` → `[sitl] Ready. SITL pid=12`. v0.19 made all `[SITL] *` init prints visible. |
+| Bridge wire | ✅ 100+ Hz on a fresh GPU | `[bridge] tx=… (114 Hz)` healthy. Drops to ~30 Hz when GPU is pressured (3rd Isaac Sim launch in a session). |
+| BF SITL stdout (v0.19) | ✅ visible in `docker logs` | `stdbuf -oL` in start.sh forces line-buffering. `[SITL] new rc 40 …` confirms host→container UDP RC works end-to-end. |
+| `mission_demo` X-pattern flight | ⚠️ flies + flips in X_LEG_1 | v019 verify run (May 1): peak rel_alt **25.7 m** (vs 49 m without v0.18), flew CLIMB → X_LEG_1, descended through pitched leg even at max throttle, FLIP'd at end of X_LEG_1. |
+| FPV camera + MP4 recording (v0.15-v0.16) | ✅ verified | `Desktop/fpv_mission_20260501_200649.mp4` (46 MB, 1952 frames, 6.5 min) horizon level, no gimbal locks. |
+| `[phys-truth]` altitude oracle (v0.16) | ✅ shipped + verified | Closed TODO #0; shim altitude faithful within ±0.4 m. |
+| Tilt-FF gate (v0.18) | ✅ verified May 1 | Peak overshoot **49 m → 25.7 m** (-48 %); recovery LOWs **28 → 8** (-71 %). The v0.13 runaway-climb is fixed. |
+| Crash-floor clamp (v0.17) | ✅ verified May 1 | Clamp fired 2× during late X_LEG_1 descent; `[floor]` log line visible, threshold + force-throttle correct. |
+| Tilt-FF strength bump (v0.20) | ⚠️ shipped UNTESTED | `tilt_throttle_factor` 0.15 → 0.25; safe behind v0.18 gate; targets v019-exposed descent-side lift deficit. **Verify NEXT.** |
+| **Altitude PID oscillation** | ⚠️ partially mitigated | Climb runaway: gated. Descent sag: maybe fixed by v0.20. ~10 m vy-momentum overshoot residual: needs Kd term (TODO #17 main, queued). |
+| **Sim hygiene — BOOT_GRACE_TIME quirk** | ⚠️ open | TODO #18. Practical workaround: don't restart container needlessly. |
+| Companion bug audit (Apr 27) | ⚠️ unchanged | Not touched in May 1 session. |
 
-**Run cadence today:** v0.16 verify (10:18), v0.16 FPV-fix verify
-(10:46), v0.17 floor-clamp verify (12:08, blocked by GPU OOM).
-Three Isaac Sim launches per session is the ceiling we hit.
+**Today's progress (May 1 2026):**
+- v0.18 tilt-FF gate: VERIFIED (cuts climb overshoot in half)
+- v0.19 BF stdbuf: shipped + verified (BF stdout visible)
+- v0.17 floor clamp: VERIFIED (activations confirmed)
+- v0.20 tilt-FF bump 0.15→0.25: shipped UNTESTED
+
+**Pickup tomorrow:** verify v0.20 first (TODO #19). If drone holds
+rel_alt ~15 m through X_LEG_1, the stack is fundamentally working;
+move to CIRCLE/landing. If still sinks, escalate to Kd term.
 
 ---
 

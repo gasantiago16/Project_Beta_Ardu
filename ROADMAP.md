@@ -15,7 +15,41 @@ architectural picture.
   GPU-OOM blocks verify in this session. Verify as a stack with the
   v0.17 floor clamp on next session's first run.
 
-## Shipped — v0.17 (Apr 29 noon 2026, UNTESTED)
+## Shipped — v0.20 (May 1 evening 2026, UNTESTED)
+
+- ⚠️ **`tilt_throttle_factor` 0.15 → 0.25.** With v0.18 gate
+  active, the v0.13-era 0.25 strength is now safe (no climb runaway
+  possible). Targets the v019-run-exposed descent-side lift deficit
+  during pitched X_LEG_1. UNTESTED — verify next session.
+
+## Shipped — v0.19 (May 1 afternoon 2026)
+
+- ✅ **`stdbuf -oL` for BF SITL stdout** in `sitl/start.sh`. BF's
+  printf was 4 KB block-buffered when stdout is a pipe (Docker
+  case), so all `[SITL] *` init/runtime prints were invisible in
+  `docker logs`. One-line fix unlocked a week's worth of buried
+  diagnostics. Verified: `[SITL] new rc 40` and full BF init
+  sequence now visible. Disproved a week-old "UDP RC isn't reaching
+  BF" theory in 60 seconds.
+
+## Shipped — v0.18 (Apr 29 afternoon 2026, VERIFIED May 1)
+
+- ✅ **Tilt-FF gate** in `_compute_waypoint_rc`: FF only fires when
+  `err_m > 0` (drone below target). Verified May 1 v019 run: peak
+  rel_alt **25.7 m** vs **49 m** without gate (-48% overshoot),
+  recovery LOWs **8** vs **28** (-71%). Verified mission ran
+  CLIMB → X_LEG_1 → flip-at-X_LEG_1-end (vs CLIMB → X_LEG_1 →
+  X_LEG_2 → X_LEG_3 → flip-with-tumble in fpvfix without gate).
+
+## Shipped — v0.17 (Apr 29 noon 2026, VERIFIED May 1)
+
+- ✅ **Crash-floor safety net** in `mission_demo`. Vario tracking
+  (LP-filtered finite-diff, tau=0.5 s) + altitude floor clamp.
+  Verified May 1: clamp fired 2 times during late X_LEG_1 descent
+  (`[floor] rel_alt=0.12m vario=-1.51m/s → forcing thr=1841`).
+  Logic + thresholds correct.
+
+## Shipped — v0.17 historical placeholder (superseded by verify above)
 
 - ⚠️ **Crash-floor safety net in `mission_demo`.** Vario tracking
   (LP-filtered finite-diff, tau=0.5 s) + altitude floor clamp. When

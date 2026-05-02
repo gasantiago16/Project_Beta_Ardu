@@ -23,12 +23,14 @@ project state.
 
 ---
 
-## Snapshot — v0.18 (Apr 29 afternoon 2026, tilt-FF gate UNTESTED)
+## Snapshot — v0.20 (May 1 evening 2026, tilt-FF bump 0.15→0.25 UNTESTED)
 
 | Component | State |
 |---|---|
-| Tilt-FF gate (v0.18) | ⚠️ shipped UNTESTED. `mission_demo._compute_waypoint_rc` now sets `tilt_boost = 0` when `err_m ≤ 0` (drone at or above target). Apr 29 fpvfix run gave the smoking gun: at 10:48:28 yaw aligned, FF kicked in, throttle jumped +24 µs INSTANTLY while drone was already 6 m above target. Drone then climbed 28 m more over 67 s. The gate kills that positive-feedback path. Verify on next session's first run AS A STACK with v0.17 floor clamp. |
-| Crash-floor clamp (v0.17) | ⚠️ shipped UNTESTED. `mission_demo` Mission tracks vario via LP-filtered finite-diff (tau=0.5 s); when in a flying phase AND `rel_alt < 3 m` AND `vario < -0.5 m/s`, force throttle to `hover + 200 µs`. If the v0.18 gate works, this clamp should be DORMANT — drone never reaches 3 m AGL. |
+| Tilt-FF coefficient bump (v0.20) | ⚠️ shipped UNTESTED. `tilt_throttle_factor` 0.15 → 0.25. Re-introduces the v0.13-era strength now that the v0.18 gate (`err_m > 0` only) prevents the v0.13 runaway-climb failure mode. Verifies pending. |
+| BF SITL line-buffered stdout (v0.19) | ✅ shipped + verified. `stdbuf -oL` in front of BF spawn in `sitl/start.sh` makes `[SITL] start UDP server …`, `[SITL] new rc …`, FDM init, etc. visible in `docker logs`. Without this, BF's printf was 4 KB block-buffered → **all** init prints were invisible, masking diagnostics for a week. **Critical instrumentation — DO NOT REMOVE.** |
+| Tilt-FF gate (v0.18) | ✅ shipped + verified. v019 verify run: peak rel_alt **25.7 m** (vs 49 m without gate), recovery LOWs **8** (vs 28). Gate cuts climb-runaway in half. Drone still flips during X_LEG_1 due to a separate descent-side lift deficit, addressed by v0.20. |
+| Crash-floor clamp (v0.17) | ✅ shipped + activation observed. v019 run had clamp fire 2 times during late X_LEG_1 (`rel_alt=0.12m vario=-1.51m/s → forcing thr=1841`). Logic + thresholds all correct. |
 | `[phys-truth]` orch log (v0.16) | ✅ shipped. `final_world_betaflight.py` logs `bf_backend._latest_state.position` every 5 s. Canonical altitude oracle. **DO NOT REMOVE** — closes TODO #0 (shim path was always faithful; the v0.15 "rel_alt = half of physics" claim was a stage-browser misread of `/World/quadrotor`, the v0.14 stale-prim bug). |
 | FPV camera rotation (v0.16) | ✅ fixed. Body-local Euler XYZ now `(75, 0, -90)` (was `-15, -90, -90`). Old angles silently mapped camera "up" into the horizontal plane (90° tilt) AND sat exactly on the Y=-90 gimbal lock. New angles: look=+X, up=+Z, 15° downtilt, no gimbal lock at any yaw. |
 | FPV camera tracker (v0.15) | ✅ shipped. Top-level `/World/fpv_camera`, world transform set every tick from `bf_backend._latest_state`. Tracks position AND yaw. |

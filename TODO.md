@@ -1,6 +1,6 @@
 # TODO
 
-Open items as of v0.17 (Apr 29 noon 2026). See `MEMORY.md` § Snapshot
+Open items as of v0.20 (May 1 evening 2026). See `MEMORY.md` § Snapshot
 for the context behind each.
 
 ## High — sim flight quality
@@ -162,38 +162,32 @@ for the context behind each.
 
 ## High — flight quality (open)
 
-16. **Crash-floor clamp — verify after fresh boot (v0.17 UNTESTED).**
-    Apr 29 noon: shipped vario tracking + crash-floor clamp in
-    `mission_demo` (`rel_alt < 3 m AND vario < -0.5 m/s` in a flying
-    phase forces `thr = hover + 200 µs`). Could not verify in this
-    session — three Isaac Sim launches hit Vulkan
-    `OUT_OF_DEVICE_MEMORY`, fourth launch's BF stuck in
-    `BOOT_GRACE_TIME` because orch FDM rate fell to ~30 Hz. Patch
-    is on `pegasus-bridge` as `3255ae1`. **Next session:** fresh
-    boot, close other GPU apps, re-run X-pattern. Confirm
-    `[floor]` log fires when expected and no regression vs v0.13's
-    X_LEG_3 14.1 m short. If clamp never fires AND drone reaches
-    corners, that's also valid — clamp is dormant safety net.
+16. ~~Crash-floor clamp — verify after fresh boot.~~ **VERIFIED
+    May 1 (v019 run).** Clamp fired 2 times during late X_LEG_1
+    descent: `[floor] rel_alt=0.12m vario=-1.51m/s phase=X_LEG_1
+    forcing thr=1841`. Logic + thresholds are correct. Drone still
+    flipped at end of X_LEG_1, but for a different reason
+    (descent-side lift deficit, addressed by v0.20). Floor clamp
+    behaves exactly as designed.
 
 17. **Altitude PID is underdamped — add Kd term keyed to vario.**
     Apr 29 fpvfix run: drone overshot 15 m cruise target to 49 m
-    (230% overshoot — original "87%" misread the cruise as 30 m;
-    actual default cruise is 15 m), then dove uncontrolled to
-    `rel_alt = -7 m`, tumbling on yaw, flipped on impact.
+    then dove uncontrolled to `rel_alt = -7 m`, flipped on impact.
     Underlying control is kp-only on rel_alt error plus a tilt-FF
     feedforward — no derivative term, classic underdamped behavior.
-    - **Tilt-FF gate** (the cheap part): SHIPPED v0.18 (UNTESTED).
-      Gate FF to fire only when `err_m > 0`. Per fpvfix log analysis,
-      this kills the dominant positive-feedback path: drone went 14m
-      → 49m past target because FF kept adding throttle as drone
-      climbed past target. With the gate, FF stops at `err_m=0` so
-      kp regains descent authority. Verify on next session's run.
-    - **Kd term** (the real fix, queued): `t_kd = -kd_per_m_s *
-      vario`. Vario is already tracked on `Mission` (added v0.17 for
+    - ~~Tilt-FF gate (the cheap part).~~ **VERIFIED v0.18 May 1.**
+      Gate FF to fire only when `err_m > 0`. v019 run: peak rel_alt
+      25.7 m (vs 49 m without gate), recovery LOWs 8 (vs 28). The
+      runaway-climb failure mode is fixed.
+    - ~~Tilt-FF strength bump.~~ **SHIPPED v0.20 May 1 (UNTESTED).**
+      `tilt_throttle_factor` 0.15 → 0.25, now safe behind the
+      gate. Targets the v019-exposed descent-side lift deficit
+      where drone sank during pitched X_LEG_1 even at max throttle.
+    - **Kd term (still queued)**: `t_kd = -kd_per_m_s * vario`.
+      Vario is already tracked on `Mission` (added v0.17 for
       the floor clamp). Start at `kd_per_m_s = 30 µs` per m/s so a
-      +1 m/s climb rate at zero error yields −30 µs throttle. Only
-      worth doing AFTER gate is verified — the gate may be enough
-      alone, in which case Kd adds complexity for no gain.
+      +1 m/s climb rate at zero error yields −30 µs throttle. Worth
+      doing only if v0.20 isn't enough — verify v0.20 first.
 
 18. **Sim hygiene — pre-warm orch FDM stream so BF clears
     BOOT_GRACE_TIME.** After a `docker compose restart` BF SITL
@@ -206,6 +200,20 @@ for the context behind each.
     the first packet BF sees. Or even simpler: just wait until
     `[bridge] tx >= 70 Hz` for 10 s before logging "ready" so the
     operator knows when to launch mission_demo.
+
+19. **Verify v0.20 tilt-FF bump (UNTESTED, NEXT SESSION FIRST).**
+    `tilt_throttle_factor` 0.15 → 0.25 with the v0.18 gate active.
+    Expected: drone holds rel_alt near 15 m through X_LEG_1
+    instead of sinking to ground. Verify checklist in commit
+    `d1dcde6` body. If still sinks → escalate to Kd term (#17
+    queued). If now over-climbs → gate failed in some way, walk
+    `_compute_waypoint_rc` logic.
+
+20. ~~BF SITL stdout invisible in docker logs.~~ **CLOSED v0.19
+    May 1.** `stdbuf -oL` in front of BF spawn in `sitl/start.sh`.
+    Now we see `[SITL] start UDP server @9004`, `[SITL] new rc
+    40 …`, all init prints. Critical instrumentation — disproved
+    a week-old "UDP RC isn't reaching BF" theory in 60 seconds.
 
 ## Not doing — rejected ideas
 
