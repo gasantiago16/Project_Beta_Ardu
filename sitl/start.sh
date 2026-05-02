@@ -83,7 +83,16 @@ else
   echo "[sitl]   ensure host bridge listens on 9002 and host firewall allows it"
 fi
 
-./betaflight_SITL "${BF_SIM_ARG}" &
+# stdbuf -oL: BF SITL's printf() block-buffers (4KB) when stdout is a
+# pipe (Docker captures BF's stdout as a pipe). The init prints
+# ([SITL] start UDP server @9004, [SITL] new rc, etc.) plus on-disarm
+# reason logs sit in the buffer and never reach `docker logs` before
+# the buffer fills, which is essentially never for the small amount
+# of stdout BF emits per session. Forcing line-buffering via stdbuf
+# makes every BF print() visible immediately. Critical for
+# diagnosing UDP-RC reception, mid-flight disarm reasons, and any
+# future BF-state observability work. v0.19, May 1 2026.
+stdbuf -oL ./betaflight_SITL "${BF_SIM_ARG}" &
 SITL_PID=$!
 echo "[sitl] BF SITL spawned (pid=$SITL_PID); waiting for MSP on :5761..."
 for i in $(seq 1 30); do
@@ -137,7 +146,9 @@ if [ -f defaults.txt ] && [ ! -f .config_applied ]; then
   touch .config_applied
 
   echo "[sitl] Phase 2: relaunch BF with saved eeprom (clean, no CLI)"
-  ./betaflight_SITL "${BF_SIM_ARG}" &
+  # See note on stdbuf above (v0.19): line-buffer BF stdout so its
+  # init/disarm/RC-receive prints become visible in `docker logs`.
+  stdbuf -oL ./betaflight_SITL "${BF_SIM_ARG}" &
   SITL_PID=$!
   echo "[sitl] Phase 2 BF spawned (pid=$SITL_PID); waiting for MSP..."
   for i in $(seq 1 30); do
