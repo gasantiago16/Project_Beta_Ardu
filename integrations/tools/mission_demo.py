@@ -240,20 +240,34 @@ class MissionConfig:
     # so the THROTTLE arming-disable flag clears before AUX1 high
     # triggers the ARM box.
     throttle_idle_us: int = 950
-    # Tilt-throttle feedforward (Apr 29, addresses TODO #11).
+    # Tilt-throttle feedforward (Apr 29 v0.13, addresses TODO #11).
     # mission16 trace showed drone altitude sagging to 2-3 m during
     # pitched flight because cos(tilt) reduces vertical thrust faster
     # than the pure-P altitude controller can compensate. This factor
     # boosts throttle when forward pitch is commanded — feedforward
     # of the predicted lift loss, runs ALONGSIDE the existing P
     # controller (which still handles steady-state and disturbances).
-    # mission20 with 0.25 was too aggressive: combined with alt P
-    # (which also pushes throttle up when below target), throttle
-    # saturated and drone climbed to 37-43m peaks then crashed to 0m
-    # in multiple cycles. 0.15 gives +30µs at full +200µs pitch =
-    # ~2% throttle boost ≈ compensates for ~11° tilt; the alt P term
-    # picks up the slack at higher tilts. Set to 0 to disable.
-    tilt_throttle_factor: float = 0.15
+    # History:
+    #   - mission20 (Apr 29): 0.25 was too aggressive, drone climbed
+    #     to 37-43m peaks (target 15) then crashed to 0m in cycles.
+    #     The reason: FF + kp both pushed throttle UP whenever drone
+    #     was below target, AND FF kept pushing throttle up even
+    #     when drone overshot target — positive feedback loop.
+    #   - v0.18 (Apr 29 afternoon): added a gate so tilt FF only
+    #     fires when err_m > 0 (below target). Fixes the runaway
+    #     climb half of the v0.13 problem — verified May 1 v019 run,
+    #     peak rel_alt 25.7m vs 49m before gate.
+    #   - v0.20 (May 1 evening): with the gate in place, the v0.13-
+    #     era 0.25 FF is now safe. v019 verify showed a NEW failure
+    #     mode: drone descends below target during pitched X_LEG_1
+    #     even at max throttle, because 0.15 doesn't compensate
+    #     enough for ~30° pitch (cos(30)=0.866 → 13% lift loss, but
+    #     0.15 only adds ~2% throttle = covers ~11° tilt). Bump to
+    #     0.25 = ~3.3% boost = covers ~15° tilt; combined with the
+    #     v0.13-era kp catching residual error, should cover the
+    #     full pitch range. The gate ensures the bump can't cause
+    #     the v0.13 runaway.
+    tilt_throttle_factor: float = 0.25
 
 
 # ── Map waypoints ──────────────────────────────────────────────────────────
