@@ -1,4 +1,4 @@
-# HANDOFF — Project_Beta_Ardu HITL flight (May 1 update)
+# HANDOFF — Project_Beta_Ardu HITL flight (May 4 update)
 
 **Audience:** Jeremy (or anyone picking this up cold).
 **Read time:** 5 minutes. Then 10 minutes to reproduce the working stack.
@@ -11,7 +11,34 @@
 
 ---
 
-## Status table (May 1 evening — current)
+## Status table (May 4 morning — current)
+
+**Today's headline:** v0.21 Kd term shipped + first-ever end-to-end
+mission completion (CLIMB → 3 legs → TO_CENTER → 2 circles →
+HANDOVER → LANDED at NE corner). Flight quality was rough
+because today's verify ran on a GPU-pressured 2nd Isaac Sim launch
+(bridge 24-31 Hz vs 186 Hz fresh). Need clean re-verify.
+
+| Layer | State | Evidence |
+|---|---|---|
+| **End-to-end mission progression** | ✅ first-ever completion | `Desktop/fpv_mission_20260504_101050.mp4` (183 MB, 9 min). State machine progressed through every phase. |
+| Vario-Kd term (v0.21) | ⚠️ shipped, ambiguous verify | kd=30 µs/(m/s), targets v020-exposed oscillation. Today's run: peak 29.5 m, 157 recoveries (vs v020's 0) — but bridge was 24-31 Hz, can't fairly evaluate. Re-verify on clean GPU. TODO #21. |
+| Tilt-FF coefficient bump (v0.20) | ✅ VERIFIED May 4 | ZERO recovery LOWs in 60s mission. Confirmed chronic recovery loop was lift-deficit-induced. |
+| Tilt-FF gate (v0.18) | ✅ verified May 1 | Peak overshoot cut from 49 m → 25.7 m (-48 %). |
+| Crash-floor clamp (v0.17) | ✅ verified | Activations confirmed; clamp catches drone before below-ground impact. |
+| BF SITL stdout (v0.19) | ✅ shipped + verified | `stdbuf -oL` makes BF prints visible; UDP RC delivery proved. |
+| FPV camera + MP4 (v0.15-v0.16) | ✅ verified | Horizon level, no gimbal locks across all today's runs. |
+| `[phys-truth]` altitude oracle (v0.16) | ✅ shipped | Closed TODO #0; shim faithful within ±0.4 m. |
+| **Sim hygiene — GPU pressure** | ⚠️ open | 2nd Isaac Sim launch in a session drops bridge from 186 → 30 Hz. Affects flight quality regardless of code. |
+| Companion bug audit (Apr 27) | ⚠️ unchanged | Not touched May 4. |
+
+**Pickup tomorrow:** TODO #21 — re-verify v0.21 on a fresh GPU. If
+mission completes cleanly with peak ≤ 18 m, ship it as the new
+baseline. If drone still oscillates or stuck at hover, tune kd
+(15 / 50). End state of stack: kp + tilt-FF (gated) + Kd ≈ classic
+PID with feedforward.
+
+## Status table (May 1 evening — superseded)
 
 | Layer | State | Evidence |
 |---|---|---|

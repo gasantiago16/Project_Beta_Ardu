@@ -1,6 +1,6 @@
 # TODO
 
-Open items as of v0.20 (May 1 evening 2026). See `MEMORY.md` § Snapshot
+Open items as of v0.21 (May 4 morning 2026). See `MEMORY.md` § Snapshot
 for the context behind each.
 
 ## High — sim flight quality
@@ -201,13 +201,26 @@ for the context behind each.
     `[bridge] tx >= 70 Hz` for 10 s before logging "ready" so the
     operator knows when to launch mission_demo.
 
-19. **Verify v0.20 tilt-FF bump (UNTESTED, NEXT SESSION FIRST).**
-    `tilt_throttle_factor` 0.15 → 0.25 with the v0.18 gate active.
-    Expected: drone holds rel_alt near 15 m through X_LEG_1
-    instead of sinking to ground. Verify checklist in commit
-    `d1dcde6` body. If still sinks → escalate to Kd term (#17
-    queued). If now over-climbs → gate failed in some way, walk
-    `_compute_waypoint_rc` logic.
+19. ~~Verify v0.20 tilt-FF bump.~~ **VERIFIED May 4.** ZERO
+    recovery LOWs in a 60s mission, peak 25.65 m, confirmed the
+    chronic recovery loop was lift-deficit-induced. v0.20 fixed
+    the upstream root cause. Drone still flipped at end of
+    X_LEG_2 because of the v020-exposed kp-only oscillation,
+    addressed by v0.21.
+
+21. **Verify v0.21 Kd term on a FRESH-GPU run.** v021 verify
+    today (May 4) ran on the 2nd Isaac Sim launch of the session
+    with GPU pressure — bridge crawled at 24-31 Hz (vs 186 Hz
+    earlier same morning). Mission completed end-to-end, but
+    flight quality was poor (peak 29.5 m, 157 recoveries, drone
+    crawled along ground after X_LEG_1). Can't tell if Kd=30 is
+    actually working or if GPU starvation dominated. **Next
+    session:** fresh boot + close GPU apps + re-run. Expected on
+    clean GPU: peak ≤ 18 m, X_LEG_1 settles within ±3 m of
+    target, no re-climb to 25 m, recovery LOWs ≤ v020's 0. If
+    drone now sticks at hover instead of reaching corners → kd
+    too aggressive, drop to 15. If still oscillates without
+    convergence → bump to 50.
 
 20. ~~BF SITL stdout invisible in docker logs.~~ **CLOSED v0.19
     May 1.** `stdbuf -oL` in front of BF spawn in `sitl/start.sh`.

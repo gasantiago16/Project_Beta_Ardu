@@ -15,7 +15,28 @@ architectural picture.
   GPU-OOM blocks verify in this session. Verify as a stack with the
   v0.17 floor clamp on next session's first run.
 
-## Shipped — v0.20 (May 1 evening 2026, UNTESTED)
+## Shipped — v0.21 (May 4 morning 2026, ambiguous verify)
+
+- ⚠️ **Kd term on vario in `_compute_waypoint_rc`.**
+  `t_kd = -kd_per_m_s * vario`, kd=30 µs/(m/s). Vario reused from
+  v0.17's tracking. Targets the kp-only oscillation v0.20 exposed.
+  Verify run today: **first-ever end-to-end mission completion**
+  (CLIMB → 3 legs → TO_CENTER → 2 circles → HANDOVER → LANDED at
+  NE corner) but on GPU-pressured 2nd Isaac Sim launch (bridge
+  24-31 Hz vs 186 Hz fresh). Flight quality poor; can't cleanly
+  evaluate kd=30. Need clean-GPU re-verify (TODO #21).
+
+## Shipped — v0.20 (May 1 evening 2026, VERIFIED May 4)
+
+- ✅ **`tilt_throttle_factor` 0.15 → 0.25.** Re-introduces
+  v0.13-era strength now safe behind the v0.18 gate. Verify run
+  May 4 (60s mission): **ZERO recovery LOWs** (vs 8 in v019, 28
+  in fpvfix). Confirmed the chronic recovery loop was
+  lift-deficit-induced. v0.20 fixed the upstream root cause.
+  Drone still flipped at end of X_LEG_2 from kp-only oscillation
+  (addressed by v0.21).
+
+## Shipped — v0.20 historical placeholder (superseded by verify above)
 
 - ⚠️ **`tilt_throttle_factor` 0.15 → 0.25.** With v0.18 gate
   active, the v0.13-era 0.25 strength is now safe (no climb runaway

@@ -23,11 +23,13 @@ project state.
 
 ---
 
-## Snapshot — v0.20 (May 1 evening 2026, tilt-FF bump 0.15→0.25 UNTESTED)
+## Snapshot — v0.21 (May 4 morning 2026, full mission completed end-to-end)
 
 | Component | State |
 |---|---|
-| Tilt-FF coefficient bump (v0.20) | ⚠️ shipped UNTESTED. `tilt_throttle_factor` 0.15 → 0.25. Re-introduces the v0.13-era strength now that the v0.18 gate (`err_m > 0` only) prevents the v0.13 runaway-climb failure mode. Verifies pending. |
+| **First end-to-end mission completion** | ✅ **MILESTONE HIT.** v0.21 verify run (May 4): drone went CLIMB → X_LEG_1 → X_LEG_2 → X_LEG_3 → TO_CENTER → CIRCLE_1 → CIRCLE_2 → HANDOVER → LANDED at NE corner. State machine completed all phases for the first time ever. **MP4: `Desktop/fpv_mission_20260504_101050.mp4`** (183 MB, 2484 frames, 9 min). |
+| Vario-Kd term (v0.21) | ⚠️ shipped + run completed but flight quality poor. `t_kd = -kd_per_m_s * vario`, kd=30 µs/(m/s). Targets the v0.20-exposed underdamped oscillation. Run today was on a GPU-pressured 2nd Isaac Sim launch — bridge crawled at 24-31 Hz vs 186 Hz for v0.20. Drone reached peak 29.5 m (vs v020's 25.7 m), recovery LOWs spiked back to 157 (vs 0 in v020). Full re-verify needed on a fresh GPU before deciding kd=30 vs 50. |
+| Tilt-FF coefficient bump (v0.20) | ✅ verified May 4. ZERO recovery LOWs in 60-second mission, peak 25.65 m. Confirmed the chronic recovery loop was lift-deficit-induced. |
 | BF SITL line-buffered stdout (v0.19) | ✅ shipped + verified. `stdbuf -oL` in front of BF spawn in `sitl/start.sh` makes `[SITL] start UDP server …`, `[SITL] new rc …`, FDM init, etc. visible in `docker logs`. Without this, BF's printf was 4 KB block-buffered → **all** init prints were invisible, masking diagnostics for a week. **Critical instrumentation — DO NOT REMOVE.** |
 | Tilt-FF gate (v0.18) | ✅ shipped + verified. v019 verify run: peak rel_alt **25.7 m** (vs 49 m without gate), recovery LOWs **8** (vs 28). Gate cuts climb-runaway in half. Drone still flips during X_LEG_1 due to a separate descent-side lift deficit, addressed by v0.20. |
 | Crash-floor clamp (v0.17) | ✅ shipped + activation observed. v019 run had clamp fire 2 times during late X_LEG_1 (`rel_alt=0.12m vario=-1.51m/s → forcing thr=1841`). Logic + thresholds all correct. |
