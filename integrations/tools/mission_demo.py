@@ -268,6 +268,30 @@ class MissionConfig:
     #     full pitch range. The gate ensures the bump can't cause
     #     the v0.13 runaway.
     tilt_throttle_factor: float = 0.25
+    # Vario-derivative throttle term (v0.21, May 4 — addresses
+    # TODO #17 main, the "underdamped P-only loop" residual).
+    # The v0.20 verify run showed a clean textbook oscillation:
+    # drone reaches peak rel_alt=25.65 m (target 15), descends to
+    # rel_alt=1.88 m, climbs back to 25.57, descends to 0.28,
+    # flips. Period ≈25 s, amplitude ±12 m, no recovery cycles
+    # (BF stayed armed throughout — v0.20 fixed the lift deficit
+    # so the recovery loop is gone). What remains is the dynamics
+    # of a kp-only altitude controller with no damping, and ~0.5
+    # m/s vy momentum entering X_LEG_1 from CLIMB.
+    #
+    # Kd term: t_kd = -kd_per_m_s * vario.
+    #   - vario > 0 (climbing) → t_kd < 0 → reduce throttle, damp
+    #     the climb. Targets the CLIMB→X_LEG vy momentum overshoot.
+    #   - vario < 0 (descending) → t_kd > 0 → boost throttle, brake
+    #     the descent. Helps before floor clamp triggers.
+    #
+    # Tuning: 30 µs per m/s of vario means a +1 m/s climb at zero
+    # err_m yields -30 µs throttle. Mission21-era data shows peak
+    # vy magnitudes of 2-3 m/s during oscillation cycles, so kd
+    # contribution caps around ±90 µs — well below throttle_max_
+    # offset=200. Plenty of headroom; if 30 isn't enough, try 50.
+    # Set to 0 to disable.
+    throttle_kd_per_m_s: float = 30.0
 
 
 # ── Map waypoints ──────────────────────────────────────────────────────────
@@ -950,9 +974,17 @@ class Mission:
                 tilt_boost = int(forward * self.cfg.tilt_throttle_factor)
             else:
                 tilt_boost = 0
+            # Kd term on vario (v0.21, addresses underdamped P-only
+            # oscillation seen in v0.20 verify run). Sign: vario > 0
+            # (climbing) → negative offset to brake the climb; vario <
+            # 0 (descending) → positive offset to brake the descent.
+            # `_vario_m_s` is updated at the top of compute_rc with a
+            # finite-diff + tau=0.5 s low-pass — already wired up from
+            # v0.17 floor clamp.
+            t_kd = -int(self.cfg.throttle_kd_per_m_s * self._vario_m_s)
             t_total = max(-self.cfg.throttle_max_offset,
                           min(self.cfg.throttle_max_offset,
-                              t_offset + tilt_boost))
+                              t_offset + tilt_boost + t_kd))
             rc[SLOT_THROTTLE] = self.cfg.throttle_hover_us + t_total
         else:
             rc[SLOT_THROTTLE] = self.cfg.throttle_hover_us
