@@ -1,5 +1,17 @@
 # Betaflight + Autonomous Nav Integration for Racing Drones
 
+**Status:** public. Racing quads + GPS Rescue. Native Betaflight stick feel during the race. Not a weapons stack.
+
+**Clone without a radio or flight controller:**
+
+```bash
+cd companion
+pip install -e ".[dev]"
+python -m unittest discover -s tests -t . -v
+```
+
+CI on `main` runs those tests plus Lua syntax. Hardware work starts at Phase 0 (GPS Rescue). Do not fly until the safety runbook and props-off MSP loopback pass. MIT, **not for safety-of-life use**.
+
 > **Build guide entry point:** [`docs/00_START_HERE.md`](docs/00_START_HERE.md)
 > **Companion software:** [`companion/`](companion/) (Python, runs on Pi Zero 2W)
 > **Betaflight CLI configs:** [`bf_config/`](bf_config/)
